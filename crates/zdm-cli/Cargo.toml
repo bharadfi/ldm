@@ -1,0 +1,15 @@
+[package]
+name = "zdm-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "zdm"
+path = "src/main.rs"
+
+[dependencies]
+zdm-core = { path = "../zdm-core" }
+anyhow.workspace = true
+tokio.workspace = true
+clap = { version = "4", features = ["derive"] }
