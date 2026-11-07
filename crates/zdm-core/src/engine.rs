@@ -24,6 +24,12 @@ pub struct Options {
     pub headers: Vec<(String, String)>,
     /// Retries per segment after a network error.
     pub retries: u32,
+    /// Proxy URL for all schemes (otherwise the standard proxy environment variables apply).
+    pub proxy: Option<String>,
+    /// HTTP Basic credentials. Marked sensitive, so reqwest does not forward them across hosts on redirect.
+    pub auth: Option<(String, String)>,
+    /// Total download rate cap in bytes per second, shared by all connections.
+    pub limit_bps: Option<u64>,
 }
 
 impl Default for Options {
@@ -35,9 +41,51 @@ impl Default for Options {
             referer: None,
             headers: Vec::new(),
             retries: 5,
+            proxy: None,
+            auth: None,
+            limit_bps: None,
         }
     }
 }
+
+/// The file on the server changed (or the server broke the Range contract) after we planned or resumed.
+#[derive(Debug)]
+struct ResumeInvalid(String);
+
+impl std::fmt::Display for ResumeInvalid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for ResumeInvalid {}
+
+/// Paces all connections to a shared byte rate.
+struct Limiter {
+    bps: u64,
+    next: Mutex<std::time::Instant>,
+}
+
+impl Limiter {
+    fn new(bps: u64) -> Self {
+        Self { bps: bps.max(1), next: Mutex::new(std::time::Instant::now()) }
+    }
+
+    async fn wait(&self, n: usize) {
+        let delay = {
+            let mut next = self.next.lock().unwrap();
+            let now = std::time::Instant::now();
+            let start = (*next).max(now);
+            *next = start + Duration::from_secs_f64(n as f64 / self.bps as f64);
+            start.saturating_duration_since(now)
+        };
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
+    }
+}
+
+type Lim = Option<Arc<Limiter>>;
 
 /// Half-open byte range `[start, end)` with a write cursor `pos`.
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -143,9 +191,34 @@ pub async fn download_probed(
 ) -> Result<()> {
     let part = sibling(dest, ".part");
     let side = sibling(dest, ".part.zdm");
+    let lim: Lim = opts.limit_bps.map(|b| Arc::new(Limiter::new(b)));
+    let on_progress = Arc::new(on_progress);
     match (p.size, p.ranges) {
-        (Some(size), true) => ranged(client, url, p, size, &part, &side, opts, on_progress).await?,
-        _ => single(client, url, p.size, &part, on_progress).await?,
+        (Some(size), true) => {
+            let cb = on_progress.clone();
+            let mut r = ranged(client, url, p, size, &part, &side, opts, &lim, move |d, t| cb(d, t)).await;
+            // The file changed under us: discard partial data, look again, and start over once.
+            if matches!(&r, Err(e) if e.downcast_ref::<ResumeInvalid>().is_some()) {
+                let _ = std::fs::remove_file(&part);
+                let _ = std::fs::remove_file(&side);
+                let p2 = probe(client, url).await?;
+                r = match (p2.size, p2.ranges) {
+                    (Some(size2), true) => {
+                        let cb = on_progress.clone();
+                        ranged(client, url, &p2, size2, &part, &side, opts, &lim, move |d, t| cb(d, t)).await
+                    }
+                    _ => {
+                        let cb = on_progress.clone();
+                        single(client, url, p2.size, &part, &lim, move |d, t| cb(d, t)).await
+                    }
+                };
+            }
+            r?
+        }
+        _ => {
+            let cb = on_progress.clone();
+            single(client, url, p.size, &part, &lim, move |d, t| cb(d, t)).await?
+        }
     }
     std::fs::rename(&part, dest).with_context(|| format!("cannot move {} to {}", part.display(), dest.display()))?;
     let _ = std::fs::remove_file(&side);
@@ -153,7 +226,7 @@ pub async fn download_probed(
 }
 
 /// Fallback when ranges are unavailable: one stream, restart from zero every time.
-async fn single(client: &Client, url: &str, size: Option<u64>, part: &Path, on_progress: impl Fn(u64, u64)) -> Result<()> {
+async fn single(client: &Client, url: &str, size: Option<u64>, part: &Path, lim: &Lim, on_progress: impl Fn(u64, u64)) -> Result<()> {
     let resp = client.get(url).send().await?.error_for_status()?;
     let file = File::create(part)?;
     let mut off = 0u64;
@@ -161,6 +234,9 @@ async fn single(client: &Client, url: &str, size: Option<u64>, part: &Path, on_p
     let mut stream = resp.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
+        if let Some(l) = lim {
+            l.wait(chunk.len()).await;
+        }
         write_at(&file, &chunk, off)?;
         off += chunk.len() as u64;
         if last.elapsed() >= Duration::from_secs(1) {
@@ -215,6 +291,7 @@ async fn ranged(
     part: &Path,
     side: &Path,
     opts: &Options,
+    lim: &Lim,
     on_progress: impl Fn(u64, u64) + Send + Sync + 'static,
 ) -> Result<()> {
     let segs = load_sidecar(side, part, url, p, size).unwrap_or_else(|| plan(size, opts.connections, opts.min_split));
@@ -228,13 +305,13 @@ async fn ranged(
 
     let mut set = JoinSet::new();
     for _ in 0..opts.connections.max(1) {
-        let (client, url, file, shared, validator, opts) =
-            (client.clone(), url.to_string(), file.clone(), shared.clone(), validator.clone(), opts.clone());
+        let (client, url, file, shared, validator, opts, lim) =
+            (client.clone(), url.to_string(), file.clone(), shared.clone(), validator.clone(), opts.clone(), lim.clone());
         set.spawn(async move {
             loop {
                 let job = shared.lock().unwrap().next_job(opts.min_split);
                 match job {
-                    Some(i) => run_segment(&client, &url, &file, &shared, i, validator.as_deref(), opts.retries).await?,
+                    Some(i) => run_segment(&client, &url, &file, &shared, i, validator.as_deref(), opts.retries, &lim).await?,
                     None => return Ok::<(), anyhow::Error>(()),
                 }
             }
@@ -280,6 +357,7 @@ async fn ranged(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_segment(
     client: &Client,
     url: &str,
@@ -288,6 +366,7 @@ async fn run_segment(
     idx: usize,
     validator: Option<&str>,
     retries: u32,
+    lim: &Lim,
 ) -> Result<()> {
     let mut attempt = 0;
     loop {
@@ -298,7 +377,7 @@ async fn run_segment(
         if pos >= end {
             return Ok(());
         }
-        match fetch_range(client, url, file, shared, idx, pos, end, validator).await {
+        match fetch_range(client, url, file, shared, idx, pos, end, validator, lim).await {
             Ok(()) => {
                 let s = &shared.lock().unwrap().segs[idx];
                 if s.pos >= s.end {
@@ -336,6 +415,7 @@ async fn fetch_range(
     pos: u64,
     end: u64,
     validator: Option<&str>,
+    lim: &Lim,
 ) -> std::result::Result<(), FetchError> {
     let mut req = client.get(url).header(RANGE, format!("bytes={}-{}", pos, end - 1));
     if let Some(v) = validator {
@@ -345,13 +425,23 @@ async fn fetch_range(
     match resp.status() {
         StatusCode::PARTIAL_CONTENT => {}
         // With If-Range, a 200 means the resource changed; without it the server broke the Range contract.
-        StatusCode::OK => return Err(FetchError::Fatal(anyhow!("server ignored range or file changed (got 200 for a ranged request)"))),
+        StatusCode::OK => {
+            return Err(FetchError::Fatal(anyhow::Error::new(ResumeInvalid(
+                "server ignored range or file changed (got 200 for a ranged request)".into(),
+            ))))
+        }
+        StatusCode::RANGE_NOT_SATISFIABLE => {
+            return Err(FetchError::Fatal(anyhow::Error::new(ResumeInvalid("range not satisfiable: file changed or truncated".into()))))
+        }
         s if s.is_server_error() || s == StatusCode::TOO_MANY_REQUESTS => return Err(FetchError::Retry(anyhow!("server returned {s}"))),
         s => return Err(FetchError::Fatal(anyhow!("server returned {s}"))),
     }
     let mut stream = resp.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| FetchError::Retry(e.into()))?;
+        if let Some(l) = lim {
+            l.wait(chunk.len()).await;
+        }
         let mut data: &[u8] = &chunk;
         while !data.is_empty() {
             // Another worker may have taken the tail of this segment; write only what is still ours.
@@ -369,6 +459,9 @@ async fn fetch_range(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod http_tests;
 
 #[cfg(test)]
 mod tests {

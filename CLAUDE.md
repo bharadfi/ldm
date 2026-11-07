@@ -33,6 +33,9 @@ Milestone 1 first cut done (Windows only): `zdm-core` (probe, work-stealing segm
 `.part.zdm` JSON resume sidecar, If-Range with strong ETag, per-segment retries) and `zdm-cli` (`zdm <url>`).
 Verified on Windows against `tools/rangesrv.py`: 8 connections, no-Range fallback, redirect, Content-Disposition
 name, kill + resume (only missing ranges re-requested), sampled byte integrity. 7 unit tests pass.
-Not yet: Linux build/test, SQLite state (currently JSON sidecar), proxy/auth/cookies, bandwidth limit,
-server-error edge cases (416, 5xx mid-stream), integration tests in CI, daemon/GUI/extension.
+Hardening pass done: proxy (incl. socks5), Basic auth (sensitive header), cookies via `-H`, shared rate limit,
+probe retry, 416/200-on-range => discard partial + re-probe + restart once, 17 tests (10 in-process HTTP
+integration tests in `crates/zdm-core/src/engine/http_tests.rs` using `src/testserver.rs`).
+Not yet: Linux build/test, SQLite state (currently JSON sidecar), digest auth, proxy auth/real-proxy and socks
+tests, mid-stream 5xx on long bodies, CI, daemon/GUI/extension.
 Developed first on Windows (engine), continue on Zorin.

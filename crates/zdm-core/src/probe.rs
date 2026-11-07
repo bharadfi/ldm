@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use reqwest::header::{HeaderName, HeaderValue, ACCEPT_ENCODING, CONTENT_DISPOSITION, CONTENT_LENGTH,
+use reqwest::header::{HeaderName, HeaderValue, ACCEPT_ENCODING, AUTHORIZATION, CONTENT_DISPOSITION, CONTENT_LENGTH,
     CONTENT_RANGE, ETAG, LAST_MODIFIED, RANGE, REFERER, USER_AGENT};
 use reqwest::{Client, StatusCode};
 
@@ -34,14 +34,38 @@ pub fn build_client(opts: &Options) -> Result<Client> {
             HeaderValue::from_str(v).with_context(|| format!("bad header value for {k}"))?,
         );
     }
-    Ok(Client::builder().default_headers(h).build()?)
+    if let Some((user, pass)) = &opts.auth {
+        use base64::Engine;
+        let token = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"));
+        let mut v = HeaderValue::from_str(&format!("Basic {token}")).context("bad credentials")?;
+        v.set_sensitive(true);
+        h.insert(AUTHORIZATION, v);
+    }
+    let mut b = Client::builder().default_headers(h);
+    if let Some(p) = &opts.proxy {
+        b = b.proxy(reqwest::Proxy::all(p).with_context(|| format!("bad proxy URL {p}"))?);
+    }
+    Ok(b.build()?)
 }
 
 /// Learn size / range support with a single `Range: bytes=0-0` request.
+/// Network errors and 5xx/429 are retried a few times.
 pub async fn probe(client: &Client, url: &str) -> Result<Probe> {
-    let resp = client.get(url).header(RANGE, "bytes=0-0").send().await.context("probe request failed")?;
+    let mut attempt = 0u32;
+    let resp = loop {
+        let r = client.get(url).header(RANGE, "bytes=0-0").send().await;
+        let transient = match &r {
+            Ok(resp) => resp.status().is_server_error() || resp.status() == StatusCode::TOO_MANY_REQUESTS,
+            Err(e) => e.is_connect() || e.is_timeout() || e.is_request(),
+        };
+        if !transient || attempt >= 3 {
+            break r.context("probe request failed")?;
+        }
+        attempt += 1;
+        tokio::time::sleep(std::time::Duration::from_millis(300 * u64::from(attempt))).await;
+    };
     let status = resp.status();
-    if !(status.is_success()) {
+    if !status.is_success() {
         anyhow::bail!("server returned {status} for {url}");
     }
     let hv = |name| resp.headers().get(name).and_then(|v| v.to_str().ok()).map(str::to_owned);
