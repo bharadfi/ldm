@@ -40,3 +40,5 @@ treeview.ldm-table progressbar trough { background: #e1ebf7; }
 .tb-sched image   { color: #00897b; }
 .tb-qstart image  { color: #2e7d32; }
 .tb-qstop image   { color: #ef6c00; }
+
+.tb-grab image { color: #6a1b9a; }

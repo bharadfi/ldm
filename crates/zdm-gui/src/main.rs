@@ -9,6 +9,7 @@
 
 mod dialogs;
 mod fmt;
+mod grabber;
 mod helpers;
 mod menus;
 mod prefs;
@@ -27,7 +28,7 @@ use gtk::{gio, glib};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 use progress::ProgressWin;
 use view::Section;
-use zdm_proto::{AddRequest, QueueInfo, Request, Response, Settings, State, TaskInfo};
+use zdm_proto::{AddRequest, GrabLink, QueueInfo, Request, Response, Settings, State, TaskInfo};
 
 static BACKGROUND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -57,6 +58,8 @@ enum Event {
     Tasks(Vec<TaskInfo>),
     Queues(Vec<QueueInfo>),
     Settings(Settings),
+    Links(Vec<GrabLink>),
+    GrabFailed(String),
     Offline(String),
     Failure(String),
 }
@@ -95,7 +98,18 @@ fn worker(events: async_channel::Sender<Event>, mut cmds: tokio::sync::mpsc::Unb
                 _ = tick.tick() => None,
                 c = cmds.recv() => match c { Some(c) => Some(c), None => return },
             };
-            if let Some(req) = req {
+            if let Some(req @ Request::Grab(_)) = req {
+                // a crawl can take a minute: run it beside the polling instead of in front of it
+                let events = events.clone();
+                tokio::spawn(async move {
+                    let ev = match zdm_proto::call(&req).await {
+                        Ok(Response::Links { links }) => Event::Links(links),
+                        Ok(_) => Event::GrabFailed("unexpected answer from the daemon".into()),
+                        Err(e) => Event::GrabFailed(e.to_string()),
+                    };
+                    let _ = events.send(ev).await;
+                });
+            } else if let Some(req) = req {
                 if let Err(e) = zdm_proto::call(&req).await {
                     let _ = events.send(Event::Failure(e.to_string())).await;
                 }
@@ -157,6 +171,7 @@ pub struct Ui {
     pub last_states: RefCell<HashMap<i64, State>>,
     pub notify_ready: std::cell::Cell<bool>,
     pub last_tip: RefCell<String>,
+    pub grab: RefCell<Option<Rc<grabber::GrabWin>>>,
     pub toolbar_box: gtk::Box,
     pub sidebar_scroll: gtk::ScrolledWindow,
     pub latest: RefCell<Vec<TaskInfo>>,
@@ -304,6 +319,7 @@ fn build_ui(app: &adw::Application) -> Rc<Ui> {
     let b_delete = make_btn("user-trash-symbolic", "Delete", "Remove the selected downloads", "tb-delete");
     let b_delete_done = make_btn("edit-clear-all-symbolic", "Delete Completed", "Remove all finished downloads from the list", "tb-done");
     toolbar_box.append(&gtk::Separator::new(gtk::Orientation::Vertical));
+    let b_grab = make_btn("system-search-symbolic", "Grabber", "Find files on a web page or site", "tb-grab");
     let b_options = make_btn("preferences-system-symbolic", "Options", "Connections, proxy, folders and browser helper", "tb-options");
     let b_sched = make_btn("alarm-symbolic", "Scheduler", "Queues and time windows", "tb-sched");
     let b_qstart = make_btn("media-seek-forward-symbolic", "Start Queue", "Resume every download of the selected queue", "tb-qstart");
@@ -358,6 +374,7 @@ fn build_ui(app: &adw::Application) -> Rc<Ui> {
         last_states: RefCell::default(),
         notify_ready: std::cell::Cell::new(false),
         last_tip: RefCell::default(),
+        grab: RefCell::default(),
         toolbar_box: toolbar_box.clone(),
         sidebar_scroll: sidebar_scroll.clone(),
         latest: RefCell::default(),
@@ -365,7 +382,7 @@ fn build_ui(app: &adw::Application) -> Rc<Ui> {
     });
     install_menu(&ui);
     menus::install(&ui, app, &menubar_slot);
-    for (btn, action) in [(&b_options, "win.options"), (&b_sched, "win.scheduler"), (&b_qstart, "win.queue-start"), (&b_qstop, "win.queue-stop")] {
+    for (btn, action) in [(&b_grab, "win.grabber"), (&b_options, "win.options"), (&b_sched, "win.scheduler"), (&b_qstart, "win.queue-start"), (&b_qstop, "win.queue-stop")] {
         let w = window.clone();
         let action = action.to_string();
         btn.connect_clicked(move |_| {
@@ -479,6 +496,8 @@ fn build_ui(app: &adw::Application) -> Rc<Ui> {
                         apply_queues(&ui, names);
                     }
                     Event::Settings(s) => *ui.settings.borrow_mut() = Some(s),
+                    Event::Links(l) => grabber::show_results(&ui, l),
+                    Event::GrabFailed(m) => grabber::show_error(&ui, &m),
                     Event::Offline(msg) => {
                         ui.banner.set_title(&format!("Starting the download service… ({msg})"));
                         ui.banner.set_revealed(true);
@@ -904,6 +923,20 @@ fn selftest(ui: &Rc<Ui>, base: String) {
             }
             let r = gtk::prelude::WidgetExt::activate_action(&u.window, &name, None);
             eprintln!("SELFTEST opened {name}: {r:?}");
+        }));
+    }
+    {
+        let b = base.clone();
+        at(3, Box::new(move |u| {
+            let _ = gtk::prelude::WidgetExt::activate_action(&u.window, "win.grabber", None);
+            send(u, Request::Grab(zdm_proto::GrabRequest { url: format!("{b}/site/"), depth: 1, same_host: true, extensions: vec!["bin".into()], max_pages: 0 }));
+        }));
+        at(9, Box::new(|u| {
+            let n = grabber::result_count(u);
+            eprintln!("SELFTEST grabber rows: {n}");
+            if n != 4 {
+                std::process::exit(4);
+            }
         }));
     }
     at(4, Box::new(|u| {

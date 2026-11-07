@@ -99,3 +99,62 @@ import { createRequire } from 'node:module';
 function await_crypto() {
   return createRequire(import.meta.url)('node:crypto');
 }
+
+import { classifyMedia, addMedia, mediaName, mediaSupported, linkKind, filterLinks, dedupeLinks, extOf } from '../src/core.js';
+
+test('recognises streams and media by URL or content type', () => {
+  assert.equal(classifyMedia({ url: 'https://v.test/a/index.m3u8?t=1' }), 'hls');
+  assert.equal(classifyMedia({ url: 'https://v.test/x', contentType: 'application/vnd.apple.mpegurl' }), 'hls');
+  assert.equal(classifyMedia({ url: 'https://v.test/x', contentType: 'application/x-mpegURL; charset=utf-8' }), 'hls');
+  assert.equal(classifyMedia({ url: 'https://v.test/m.mpd' }), 'dash');
+  assert.equal(classifyMedia({ url: 'https://v.test/clip.mp4', size: 5_000_000 }), 'video');
+  assert.equal(classifyMedia({ url: 'https://v.test/stream', contentType: 'video/webm' }), 'video');
+  assert.equal(classifyMedia({ url: 'https://v.test/song', contentType: 'audio/mpeg' }), 'audio');
+});
+
+test('ignores segments, tracking clips and non-media', () => {
+  assert.equal(classifyMedia({ url: 'https://v.test/seg1.ts' }), null);
+  assert.equal(classifyMedia({ url: 'https://v.test/x', contentType: 'video/MP2T' }), null);
+  assert.equal(classifyMedia({ url: 'https://v.test/seg.m4s', contentType: 'video/mp4' }), null);
+  assert.equal(classifyMedia({ url: 'https://v.test/pixel.mp4', size: 900 }), null);
+  assert.equal(classifyMedia({ url: 'https://v.test/page.html', contentType: 'text/html' }), null);
+  assert.equal(classifyMedia({ url: 'blob:https://v.test/uuid', contentType: 'video/mp4' }), null);
+  assert.equal(classifyMedia({ url: 'https://v.test/unknown-size.mp4', size: -1 }), 'video', 'unknown size is kept');
+});
+
+test('media list is deduped and capped, names are readable, dash is flagged', () => {
+  let l = [];
+  l = addMedia(l, { url: 'https://a/1.mp4' });
+  l = addMedia(l, { url: 'https://a/1.mp4' });
+  assert.equal(l.length, 1);
+  for (let i = 0; i < 50; i++) l = addMedia(l, { url: `https://a/${i}.mp4` }, 10);
+  assert.equal(l.length, 10);
+  assert.equal(l.at(-1).url, 'https://a/49.mp4', 'newest are kept');
+  assert.equal(mediaName('https://v.test/dir/My%20Clip.mp4?x=1'), 'My Clip.mp4');
+  assert.equal(mediaName('https://v.test/'), 'v.test');
+  assert.equal(mediaSupported('hls'), true);
+  assert.equal(mediaSupported('dash'), false);
+});
+
+test('link kinds, filtering and dedupe for "download all links"', () => {
+  assert.equal(extOf('https://x/y/File.PDF?a=1'), 'pdf');
+  assert.equal(linkKind('https://x/a.zip'), 'archive');
+  assert.equal(linkKind('https://x/a.jpg'), 'image');
+  assert.equal(linkKind('https://x/a.m3u8'), 'video');
+  assert.equal(linkKind('https://x/about'), 'page');
+  assert.equal(linkKind('https://x/about.html'), 'page');
+  assert.equal(linkKind('https://x/data.xyz'), 'other');
+  const links = [
+    { url: 'https://x/a.zip', text: 'Archive' }, { url: 'https://x/a.zip', text: 'dup' }, { url: 'https://x/p.pdf', text: 'Paper' },
+    { url: 'https://x/about', text: 'About' }, { url: 'mailto:a@b.c' }, { url: 'https://x/i.png', text: '' },
+  ];
+  assert.equal(dedupeLinks(links).length, 4);
+  assert.deepEqual(filterLinks(links, new Set(['archive', 'document', 'image'])).map((l) => l.kind), ['archive', 'document', 'image']);
+  assert.deepEqual(filterLinks(links, new Set(['archive'])).map((l) => l.url), ['https://x/a.zip']);
+  assert.deepEqual(filterLinks(links, new Set(['archive', 'document']), 'paper').map((l) => l.url), ['https://x/p.pdf']);
+});
+
+test('built manifests list the permissions and files the new features need', () => {
+  const src = readFileSync(new URL('../build.py', import.meta.url), 'utf8');
+  for (const needle of ['"webRequest"', '"scripting"', '"links.html"', '"links.js"', '"host.js"']) assert.ok(src.includes(needle), needle);
+});

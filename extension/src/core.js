@@ -66,3 +66,96 @@ export function parseExcludedHosts(text) {
     .map((s) => s.trim())
     .filter(Boolean);
 }
+
+// ---- video / media sniffing -------------------------------------------------------------------------------
+
+const MEDIA_EXT = {
+  m3u8: 'hls', mpd: 'dash',
+  mp4: 'video', m4v: 'video', webm: 'video', mkv: 'video', mov: 'video', flv: 'video', avi: 'video', ogv: 'video',
+  mp3: 'audio', m4a: 'audio', aac: 'audio', ogg: 'audio', opus: 'audio', flac: 'audio', wav: 'audio',
+};
+const MEDIA_TYPES = [[/mpegurl/i, 'hls'], [/dash\+xml/i, 'dash'], [/^video\//i, 'video'], [/^audio\//i, 'audio']];
+// Pieces of a stream: listing every one of them would bury the real video.
+const SEGMENT_EXT = new Set(['ts', 'm4s', 'cmfv', 'cmfa']);
+const MIN_MEDIA_BYTES = 200 * 1024;
+
+export function extOf(url) {
+  try {
+    const last = new URL(url).pathname.split('/').pop() || '';
+    const i = last.lastIndexOf('.');
+    return i > 0 ? last.slice(i + 1).toLowerCase() : '';
+  } catch {
+    return '';
+  }
+}
+
+/** 'hls' | 'dash' | 'video' | 'audio' for a response worth offering for download, else null. */
+export function classifyMedia({ url, contentType = '', size = -1 }) {
+  if (!isHttp(url)) return null;
+  const ext = extOf(url);
+  if (SEGMENT_EXT.has(ext)) return null;
+  const ct = String(contentType).split(';')[0].trim().toLowerCase();
+  if (ct === 'video/mp2t') return null; // a bare transport-stream segment
+  let kind = MEDIA_EXT[ext] ?? null;
+  if (!kind) for (const [re, k] of MEDIA_TYPES) if (re.test(ct)) { kind = k; break; }
+  if (!kind) return null;
+  // tiny clips are tracking pixels, previews or ads (the size is unknown for ranged/streamed responses)
+  if ((kind === 'video' || kind === 'audio') && size >= 0 && size < MIN_MEDIA_BYTES) return null;
+  return kind;
+}
+
+/** Add a sniffed item once per URL, keeping at most `max` of the newest. */
+export function addMedia(list, entry, max = 40) {
+  if (list.some((e) => e.url === entry.url)) return list;
+  const next = [...list, entry];
+  return next.length > max ? next.slice(next.length - max) : next;
+}
+
+export function mediaName(url) {
+  try {
+    const u = new URL(url);
+    const last = decodeURIComponent(u.pathname.split('/').filter(Boolean).pop() || '');
+    return last || u.hostname;
+  } catch {
+    return url;
+  }
+}
+
+/** DASH manifests are listed but cannot be downloaded yet. */
+export function mediaSupported(kind) {
+  return kind !== 'dash';
+}
+
+// ---- "download all links" ---------------------------------------------------------------------------------
+
+const KIND_EXT = {
+  document: 'pdf doc docx xls xlsx ppt pptx odt ods odp txt epub rtf csv',
+  image: 'jpg jpeg png gif bmp webp svg tif tiff ico',
+  video: 'mp4 mkv avi mov wmv webm flv m4v mpg mpeg 3gp ogv m3u8',
+  audio: 'mp3 flac aac ogg opus wav wma m4a',
+  archive: 'zip 7z rar gz bz2 xz zst tar tgz',
+  program: 'exe msi deb rpm appimage apk iso img bin sh run',
+};
+const EXT_KIND = Object.fromEntries(Object.entries(KIND_EXT).flatMap(([k, v]) => v.split(' ').map((e) => [e, k])));
+export const LINK_KINDS = ['document', 'image', 'video', 'audio', 'archive', 'program', 'other'];
+const PAGE_EXT = new Set(['', 'html', 'htm', 'xhtml', 'php', 'asp', 'aspx', 'jsp', 'cgi', 'shtml']);
+
+/** Kind of a link: a known file type, 'page' for ordinary web pages, else 'other' (unknown file type). */
+export function linkKind(url) {
+  const e = extOf(url);
+  if (EXT_KIND[e]) return EXT_KIND[e];
+  return PAGE_EXT.has(e) ? 'page' : 'other';
+}
+
+export function dedupeLinks(links) {
+  const seen = new Set();
+  return links.filter((l) => isHttp(l.url) && !seen.has(l.url) && seen.add(l.url));
+}
+
+/** Links that are downloadable files of the wanted kinds (a Set), matching the optional text. */
+export function filterLinks(links, kinds, text = '') {
+  const q = text.trim().toLowerCase();
+  return dedupeLinks(links)
+    .map((l) => ({ ...l, kind: linkKind(l.url) }))
+    .filter((l) => l.kind !== 'page' && kinds.has(l.kind) && (!q || l.url.toLowerCase().includes(q) || (l.text || '').toLowerCase().includes(q)));
+}

@@ -11,7 +11,7 @@ use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use zdm_core::{build_client, download_probed, probe, Cancelled, Options};
-use zdm_proto::{AddRequest, QueueInfo, Settings, State, TaskInfo};
+use zdm_proto::{AddRequest, GrabLink, GrabRequest, QueueInfo, Settings, State, TaskInfo};
 
 use crate::categories::categorize;
 use crate::config::Config;
@@ -63,6 +63,18 @@ fn save_settings(path: &Path, s: &Settings) -> Result<()> {
     Ok(())
 }
 
+/// File-name stem for a stream URL: `/show/ep1/index.m3u8` -> `ep1` (generic playlist names use the folder).
+fn hls_stem(url: &str) -> String {
+    let u = url::Url::parse(url).ok();
+    let segs: Vec<String> = u.as_ref().and_then(|u| u.path_segments()).map(|s| s.filter(|x| !x.is_empty()).map(str::to_string).collect()).unwrap_or_default();
+    let stem = |s: &str| s.rsplit_once('.').map_or(s, |(a, _)| a).to_string();
+    let generic = ["index", "playlist", "master", "chunklist", "stream", "manifest", "main"];
+    let last = segs.last().map(|s| stem(s)).unwrap_or_default();
+    let name = if (last.is_empty() || generic.contains(&last.to_ascii_lowercase().as_str())) && segs.len() > 1 { segs[segs.len() - 2].clone() } else { last };
+    let name: String = name.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ' ') { c } else { '_' }).collect();
+    if name.is_empty() { u.and_then(|u| u.host_str().map(str::to_string)).unwrap_or_else(|| "video".into()) } else { name }
+}
+
 pub struct Manager {
     cfg: Config,
     settings: Mutex<Settings>,
@@ -94,6 +106,22 @@ impl Manager {
         save_settings(&settings_path(&self.cfg), &s)?;
         *self.settings.lock().unwrap() = s;
         Ok(())
+    }
+
+    /// Look for downloadable files on a page. Uses the proxy from the settings.
+    pub async fn grab(&self, g: GrabRequest) -> Result<Vec<GrabLink>> {
+        let opts = Options { proxy: self.settings().proxy, ..Options::default() };
+        let client = build_client(&opts)?;
+        let go = zdm_core::grab::GrabOptions {
+            depth: g.depth.min(5),
+            same_host: g.same_host,
+            extensions: g.extensions.iter().map(|e| e.trim_start_matches('.').to_ascii_lowercase()).filter(|e| !e.is_empty()).collect(),
+            max_pages: if g.max_pages == 0 { 100 } else { (g.max_pages as usize).min(300) },
+            ..Default::default()
+        };
+        let cancel = CancellationToken::new();
+        let found = tokio::time::timeout(Duration::from_secs(120), zdm_core::grab::crawl(&client, &g.url, &go, &cancel)).await.map_err(|_| anyhow!("the site took too long to explore"))??;
+        Ok(found.into_iter().map(|f| GrabLink { url: f.url, name: f.name, ext: f.ext, from: f.from }).collect())
     }
 
     pub fn move_task(&self, id: i64, queue: &str) -> Result<()> {
@@ -195,6 +223,7 @@ impl Manager {
                 for p in [d.clone(), sibling(&d, ".part"), sibling(&d, ".part.zdm"), sibling(&d, ".part.zdm.tmp")] {
                     let _ = std::fs::remove_file(p);
                 }
+                let _ = std::fs::remove_dir_all(sibling(&d, ".hls"));
             }
         }
         self.wake.notify_one();
@@ -328,6 +357,9 @@ impl Manager {
             opts.user_agent = ua.clone();
         }
         let client = build_client(&opts)?;
+        if zdm_core::hls::is_hls_url(&row.info.url) {
+            return self.execute_hls(id, &row, &client, cancel, set.connections as usize).await;
+        }
         let p = tokio::select! {
             _ = cancel.cancelled() => return Err(Cancelled.into()),
             p = probe(&client, &row.info.url) => p?,
@@ -344,6 +376,35 @@ impl Manager {
             let _ = this.store().set_downloaded(id, done);
         })
         .await
+    }
+
+    /// A video stream (`.m3u8`): segments are fetched in parallel, joined, and remuxed to MP4 when ffmpeg exists.
+    async fn execute_hls(self: &Arc<Self>, id: i64, row: &crate::store::TaskRow, client: &reqwest::Client, cancel: &CancellationToken, connections: usize) -> Result<()> {
+        let dest = match &row.info.dest {
+            Some(d) => PathBuf::from(d),
+            None => {
+                let ext = if zdm_core::hls::ffmpeg_path().is_some() { "mp4" } else { "ts" };
+                let name = row.info.filename.clone().unwrap_or_else(|| format!("{}.{ext}", hls_stem(&row.info.url)));
+                self.choose_dest(id, &name, row.dest_dir.as_deref(), None)?
+            }
+        };
+        let this = self.clone();
+        let opts = zdm_core::hls::HlsOptions { cancel: cancel.clone(), connections: connections.min(8), remux: true, variant: None };
+        let done = zdm_core::hls::download_hls(client, &row.info.url, &dest, &opts, move |done, total| {
+            let s = this.store();
+            let _ = s.set_downloaded(id, done);
+            if total > 0 {
+                let _ = s.set_size(id, Some(total));
+            }
+        })
+        .await?;
+        // the result can differ from the plan (.mp4 -> .ts when ffmpeg could not convert): record the truth
+        let len = std::fs::metadata(&done)?.len();
+        let name = done.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let s = self.store();
+        s.set_meta(id, &name, &done.to_string_lossy(), categorize(&name), Some(len))?;
+        s.set_downloaded(id, len)?;
+        Ok(())
     }
 
     /// Pick a unique destination path under the category folder and record it before downloading.

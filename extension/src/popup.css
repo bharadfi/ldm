@@ -9,3 +9,8 @@ h1 { font-size: 15px; margin: 0 0 8px; }
 input[type=number], textarea { font: inherit; padding: 4px 6px; }
 small { display: block; opacity: .7; margin-top: 4px; }
 button { font: inherit; padding: 4px 10px; }
+
+h2 { font-size: 13px; margin: 10px 0 4px; }
+.list { list-style: none; margin: 0; padding: 0; max-height: 180px; overflow: auto; }
+.list li { display: flex; gap: 8px; align-items: center; padding: 3px 0; }
+.list .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

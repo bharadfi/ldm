@@ -36,7 +36,7 @@ def base_manifest():
         "name": "ZDM Download Manager",
         "version": VERSION,
         "description": "Hands browser downloads to the ZDM download manager for segmented, resumable downloads.",
-        "permissions": ["downloads", "cookies", "nativeMessaging", "storage", "contextMenus"],
+        "permissions": ["downloads", "cookies", "nativeMessaging", "storage", "contextMenus", "webRequest", "scripting"],
         "host_permissions": ["http://*/*", "https://*/*"],
         "action": {"default_popup": "popup.html", "default_title": "ZDM Download Manager"},
         "icons": {"16": "icon16.png", "48": "icon48.png", "128": "icon128.png"},
@@ -100,7 +100,7 @@ def build(target):
     if out.exists():
         shutil.rmtree(out)
     out.mkdir(parents=True)
-    for f in ("core.js", "background.js", "popup.html", "popup.css", "popup.js"):
+    for f in ("core.js", "host.js", "background.js", "popup.html", "popup.css", "popup.js", "links.html", "links.js"):
         shutil.copy(SRC / f, out / f)
     for s in (16, 48, 128):
         (out / f"icon{s}.png").write_bytes(icon(s))

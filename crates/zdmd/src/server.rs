@@ -38,6 +38,7 @@ pub async fn dispatch(m: &Arc<Manager>, req: Request) -> Response {
                 m.move_task(id, &queue)?;
                 Response::Ok
             }
+            Request::Grab(g) => Response::Links { links: m.grab(g).await? },
             Request::GetSettings => Response::Settings(m.settings()),
             Request::SetSettings(s) => {
                 m.set_settings(s)?;

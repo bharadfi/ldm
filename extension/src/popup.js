@@ -1,4 +1,5 @@
-import { DEFAULTS, parseExcludedHosts } from './core.js';
+import { DEFAULTS, parseExcludedHosts, mediaName, mediaSupported } from './core.js';
+import { handOver } from './host.js';
 
 const api = globalThis.browser ?? globalThis.chrome;
 const $ = (id) => document.getElementById(id);
@@ -46,3 +47,43 @@ $('grantBtn').addEventListener('click', async () => {
 await load();
 await checkPermission();
 await checkDaemon();
+
+// ---- sniffed videos of the current tab ----
+const [tab] = await api.tabs.query({ active: true, currentWindow: true });
+
+async function showMedia() {
+  if (!tab) return;
+  const key = `media:${tab.id}`;
+  const list = ((await (api.storage.session ?? api.storage.local).get(key))[key] ?? []).slice().reverse();
+  $('media').hidden = list.length === 0;
+  const ul = $('mediaList');
+  ul.replaceChildren();
+  for (const m of list) {
+    const li = document.createElement('li');
+    const label = document.createElement('span');
+    label.className = 'name';
+    label.title = m.url;
+    label.textContent = `${m.kind.toUpperCase()} · ${mediaName(m.url)}`;
+    const btn = document.createElement('button');
+    btn.textContent = mediaSupported(m.kind) ? 'Download' : 'Not supported yet';
+    btn.disabled = !mediaSupported(m.kind);
+    btn.addEventListener('click', async () => {
+      try {
+        await handOver({ url: m.url, referer: m.page || tab.url });
+        btn.textContent = 'Sent to ZDM';
+        btn.disabled = true;
+      } catch (e) {
+        btn.textContent = 'Failed';
+        btn.title = e.message;
+      }
+    });
+    li.append(label, btn);
+    ul.append(li);
+  }
+}
+
+$('allLinks').addEventListener('click', async () => {
+  if (tab) await api.tabs.create({ url: api.runtime.getURL(`links.html?tab=${tab.id}`) });
+  window.close();
+});
+await showMedia();

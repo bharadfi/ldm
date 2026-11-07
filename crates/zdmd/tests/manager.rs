@@ -319,3 +319,43 @@ async fn move_task_between_queues() {
     assert!(env.m.move_task(t.id, "Nope").is_err());
     env.stop().await;
 }
+
+#[tokio::test]
+async fn grab_request_finds_files_through_the_protocol() {
+    use zdm_core::testserver::{serve_site, Routes};
+    let mut r = Routes::new();
+    r.insert("/".into(), ("text/html".into(), br#"<a href="a.iso">a</a><a href="b.txt">b</a><a href="more.html">m</a>"#.to_vec()));
+    r.insert("/more.html".into(), ("text/html".into(), br#"<a href="c.iso">c</a>"#.to_vec()));
+    let site = serve_site(r).await;
+    let env = Env::new(None);
+    let links = env.m.grab(zdm_proto::GrabRequest { url: site.url("/"), depth: 1, same_host: true, extensions: vec![".ISO".into()], max_pages: 0 }).await.unwrap();
+    assert_eq!(links.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(), ["a.iso", "c.iso"]);
+    assert!(env.m.grab(zdm_proto::GrabRequest { url: "ftp://x".into(), depth: 0, same_host: true, extensions: vec![], max_pages: 0 }).await.is_err());
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn video_stream_url_downloads_through_the_manager() {
+    use zdm_core::testserver::{serve_site, Routes};
+    std::env::set_var("ZDM_FFMPEG", "none"); // keep the result a plain .ts so the content can be compared
+    let seg = |i: usize| -> Vec<u8> { (0..3000).map(|n| ((n + i * 11) % 251) as u8).collect() };
+    let mut r = Routes::new();
+    r.insert("/show/ep1/index.m3u8".into(), ("application/vnd.apple.mpegurl".into(), b"#EXTM3U\n#EXTINF:4,\nc0.ts\n#EXTINF:4,\nc1.ts\n#EXTINF:4,\nc2.ts\n#EXT-X-ENDLIST\n".to_vec()));
+    for i in 0..3 {
+        r.insert(format!("/show/ep1/c{i}.ts"), ("video/mp2t".into(), seg(i)));
+    }
+    let site = serve_site(r).await;
+    let env = Env::new(None);
+    env.add(site.url("/show/ep1/index.m3u8"));
+    let tasks = env.until("stream completion", |t| t.iter().all(|x| x.state == State::Completed || x.state == State::Failed)).await;
+    let t = &tasks[0];
+    assert_eq!(t.state, State::Completed, "{:?}", t.error);
+    assert_eq!(Path::new(t.dest.as_deref().unwrap()), env.dl().join("Video").join("ep1.ts"));
+    assert_eq!(std::fs::read(t.dest.as_deref().unwrap()).unwrap(), (0..3).flat_map(seg).collect::<Vec<u8>>());
+    assert_eq!(t.size, Some(9000));
+    assert_eq!(t.downloaded, 9000);
+    // deleting with files removes the video and any work folder
+    env.m.remove(t.id, true).await.unwrap();
+    assert!(files_under(&env.dl()).is_empty(), "{:?}", files_under(&env.dl()));
+    env.stop().await;
+}

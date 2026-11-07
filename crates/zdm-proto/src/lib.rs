@@ -119,6 +119,33 @@ pub struct TaskInfo {
     pub added_at: i64,
 }
 
+/// Ask the daemon to look for downloadable files on a page (and, with `depth`, the pages it links to).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct GrabRequest {
+    pub url: String,
+    /// 0 = only this page, 1 = also the pages it links to, ... (the daemon caps it at 5).
+    #[serde(default)]
+    pub depth: u32,
+    /// Only follow pages on the same host.
+    #[serde(default = "yes")]
+    pub same_host: bool,
+    /// Lowercase extensions without the dot; empty = every link that looks like a file.
+    #[serde(default)]
+    pub extensions: Vec<String>,
+    /// Page limit (the daemon caps it at 300).
+    #[serde(default)]
+    pub max_pages: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct GrabLink {
+    pub url: String,
+    pub name: String,
+    pub ext: String,
+    /// The page it was found on.
+    pub from: String,
+}
+
 /// Daemon-wide settings, editable from the Options dialog and saved by the daemon.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Settings {
@@ -168,6 +195,8 @@ pub enum Request {
     MoveTask { id: i64, queue: String },
     GetSettings,
     SetSettings(Settings),
+    /// Crawl for files (can take a while; answered with `Links`).
+    Grab(GrabRequest),
     Ping,
 }
 
@@ -180,6 +209,7 @@ pub enum Response {
     Tasks { tasks: Vec<TaskInfo> },
     Queues { queues: Vec<QueueInfo> },
     Settings(Settings),
+    Links { links: Vec<GrabLink> },
     Error { message: String },
 }
 
@@ -271,6 +301,15 @@ mod tests {
     fn window_all_day() {
         let w = Window { start_min: 0, end_min: 0, days: 0x7f };
         assert!(w.active_at(1234, 3));
+    }
+
+    #[test]
+    fn grab_request_defaults() {
+        let r: Request = serde_json::from_str(r#"{"cmd":"grab","url":"http://x/"}"#).unwrap();
+        match r {
+            Request::Grab(g) => assert!(g.same_host && g.depth == 0 && g.extensions.is_empty() && g.max_pages == 0),
+            _ => panic!(),
+        }
     }
 
     #[test]

@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ZDM – links on this page</title>
+  <link rel="stylesheet" href="popup.css">
+  <style>
+    body { width: auto; max-width: 980px; margin: 16px auto; padding: 0 16px; }
+    .bar { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin: 8px 0; }
+    #list li { border-bottom: 1px solid #e3e8ef; padding: 4px 0; }
+    #list .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #list { max-height: none; }
+    .kind { color: #5b6b82; width: 70px; }
+  </style>
+</head>
+<body>
+  <h1>Links on this page</h1>
+  <p id="where" class="status">Reading the page…</p>
+  <div class="bar" id="kinds"></div>
+  <div class="bar">
+    <input id="text" type="search" placeholder="Only links containing…" style="flex:1">
+    <button id="all">Select all</button>
+    <button id="none">Select none</button>
+    <button id="go" disabled>Download selected</button>
+  </div>
+  <ul id="list" class="list"></ul>
+  <script type="module" src="links.js"></script>
+</body>
+</html>

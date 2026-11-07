@@ -34,12 +34,12 @@ observation only, our own icons/strings/code. `[x]` done, `[~]` partly, `[ ]` no
 ## Browser integration
 - [x] Extension + native host: takeover of downloads (Firefox deb, Brave verified; Chrome same code)
 - [~] Context menu "Download with ZDM"
-- [ ] "Download all links" / "Download all images" page tools, video/stream sniffer overlay button (MP4/WebM, HLS, DASH)
+- [x] "Download links from this page" (type filters, tick boxes) and a video/stream sniffer with per-tab list and toolbar badge (logic unit-tested; [ ] not yet tried in a real browser); [ ] DASH, on-video overlay button
 - [ ] Per-site exceptions UI polish, file-type list, Shift/Alt-click bypass, store packaging
 
 ## Grabber / media
-- [ ] Site grabber (crawl a site/page for files by type, depth, filters) and project queues
-- [ ] HLS/DASH download + mux (ffmpeg), YouTube-style page parsers are out of scope unless the owner asks
+- [x] Site grabber: crawl a page/site by depth, same-site rule and file types (daemon `Grab` + window dialog, referrer kept); [ ] saved grabber projects, include/exclude patterns, login-protected sites
+- [x] HLS download (master/media playlists, byte ranges, AES-128, resume, pause, MP4 remux via ffmpeg, `.ts` fallback); [ ] DASH, live streams, SAMPLE-AES; YouTube-style page parsers stay out of scope unless the owner asks
 - [ ] Video conversion on completion (optional, via ffmpeg)
 
 ## Packaging

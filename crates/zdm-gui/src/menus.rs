@@ -52,7 +52,7 @@ pub fn install(ui: &Rc<Ui>, app: &adw::Application, slot: &gtk::Box) {
     let bar = gio::Menu::new();
 
     let tasks = gio::Menu::new();
-    tasks.append_section(None, &section(&[("Add new download…", "win.add"), ("Add batch download from text…", "win.batch")]));
+    tasks.append_section(None, &section(&[("Add new download…", "win.add"), ("Add batch download from text…", "win.batch"), ("Site grabber…", "win.grabber")]));
     tasks.append_section(None, &section(&[("Import list from file…", "win.import"), ("Export list to file…", "win.export")]));
     tasks.append_section(None, &section(&[("Exit", "win.quit")]));
     bar.append_submenu(Some("_Tasks"), &tasks);
@@ -85,6 +85,7 @@ pub fn install(ui: &Rc<Ui>, app: &adw::Application, slot: &gtk::Box) {
     };
     mk("add", Box::new(add_dialog));
     mk("batch", Box::new(dialogs::batch_dialog));
+    mk("grabber", Box::new(crate::grabber::open));
     mk("import", Box::new(dialogs::import_list));
     mk("export", Box::new(dialogs::export_list));
     mk("quit", Box::new(|u| {

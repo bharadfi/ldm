@@ -16,6 +16,24 @@ pub fn parse_urls(text: &str) -> Vec<String> {
     out
 }
 
+pub const GRAB_PRESETS: [&str; 8] = ["All files", "Documents", "Images", "Video", "Music", "Compressed", "Programs", "Custom…"];
+
+/// Extensions for a preset of the site grabber (empty = every file-like link). `custom` is free text such as
+/// `pdf, .zip  mp3` and is used for the last preset.
+pub fn preset_extensions(index: usize, custom: &str) -> Vec<String> {
+    let list: &[&str] = match index {
+        1 => &["pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "txt", "epub", "rtf", "csv"],
+        2 => &["jpg", "jpeg", "png", "gif", "bmp", "webp", "svg", "tif", "tiff", "ico"],
+        3 => &["mp4", "mkv", "avi", "mov", "wmv", "webm", "flv", "m4v", "mpg", "mpeg", "3gp", "ogv", "m3u8", "ts"],
+        4 => &["mp3", "flac", "aac", "ogg", "opus", "wav", "wma", "m4a"],
+        5 => &["zip", "7z", "rar", "gz", "bz2", "xz", "zst", "tar", "tgz"],
+        6 => &["exe", "msi", "deb", "rpm", "appimage", "apk", "iso", "img", "bin", "sh", "run"],
+        7 => return custom.split(|c: char| c.is_whitespace() || c == ',').map(|e| e.trim_start_matches('.').to_ascii_lowercase()).filter(|e| !e.is_empty()).collect(),
+        _ => &[],
+    };
+    list.iter().map(|s| s.to_string()).collect()
+}
+
 pub const DAY_NAMES: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
 /// `days` bit 0 = Monday ... bit 6 = Sunday (same as the daemon).
@@ -82,6 +100,14 @@ mod tests {
         let t = "https://a.org/x.zip\nnot a url\n<http://b.net/y> ftp://c/z\nhttps://a.org/x.zip, https://";
         assert_eq!(parse_urls(t), vec!["https://a.org/x.zip", "http://b.net/y"]);
         assert!(parse_urls("").is_empty());
+    }
+
+    #[test]
+    fn grabber_presets() {
+        assert!(preset_extensions(0, "").is_empty());
+        assert!(preset_extensions(3, "").contains(&"m3u8".to_string()));
+        assert_eq!(preset_extensions(7, " .PDF, zip\tmp3 ,, "), ["pdf", "zip", "mp3"]);
+        assert!(preset_extensions(99, "x").is_empty());
     }
 
     #[test]

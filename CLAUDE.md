@@ -94,4 +94,7 @@ GtkListStore row handles across a `remove` (see `row_index`/`apply_tasks`); the 
 Tray: `crates/zdm-gui/src/tray.rs` (ksni, blocking API; shown by GNOME AppIndicator). Notifications use GApplication
 (`org.gtk.Notifications` on GNOME; verified with `busctl --user monitor org.gtk.Notifications`). `LDM_NO_TRAY=1` disables the
 tray; the self-test skips it. `zdm-gui --background` starts hidden (autostart entry in ~/.config/autostart, toggled in Options).
+Grabber/video: `zdm-core/src/grab.rs` (crawler, own tag scanner), `zdm-core/src/hls.rs` (HLS + AES-128 + ffmpeg remux, `ZDM_FFMPEG=none|/path`),
+daemon `Request::Grab` and `.m3u8` tasks (`Manager::execute_hls`, work dir `<dest>.hls/`), GUI `grabber.rs`, extension sniffer + `links.html`.
+`testserver::serve_site` serves canned pages for crawler/HLS tests; `tools/rangesrv.py` has `/site/` pages for the GUI self-test.
 

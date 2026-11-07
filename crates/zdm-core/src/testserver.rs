@@ -155,3 +155,58 @@ async fn handle(mut s: TcpStream, cfg: Config, log: Arc<Mutex<Vec<Req>>>, c: Arc
     }
     s.shutdown().await
 }
+
+/// A tiny static site for crawler/HLS tests: `routes` maps a path to (content type, body). Every GET gets the
+/// whole body (Range is ignored); unknown paths get 404. `log` records the requested paths.
+pub struct Site {
+    pub addr: SocketAddr,
+    pub hits: Arc<Mutex<Vec<String>>>,
+}
+
+impl Site {
+    pub fn url(&self, path: &str) -> String {
+        format!("http://{}{}", self.addr, path)
+    }
+    pub fn hits(&self) -> Vec<String> {
+        self.hits.lock().unwrap().clone()
+    }
+}
+
+pub type Routes = std::collections::HashMap<String, (String, Vec<u8>)>;
+
+pub async fn serve_site(routes: Routes) -> Site {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let hits = Arc::new(Mutex::new(Vec::new()));
+    let (routes, h2) = (Arc::new(routes), hits.clone());
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut s, _)) = listener.accept().await else { return };
+            let (routes, hits) = (routes.clone(), h2.clone());
+            tokio::spawn(async move {
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 2048];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match s.read(&mut tmp).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                    }
+                }
+                let head = String::from_utf8_lossy(&buf).to_string();
+                let path = head.split_whitespace().nth(1).unwrap_or("/").split('?').next().unwrap_or("/").to_string();
+                hits.lock().unwrap().push(path.clone());
+                let resp: Vec<u8> = match routes.get(&path) {
+                    Some((ct, body)) => {
+                        let mut r = format!("HTTP/1.1 200 OK\r\nContent-Type: {ct}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).into_bytes();
+                        r.extend_from_slice(body);
+                        r
+                    }
+                    None => b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+                };
+                let _ = s.write_all(&resp).await;
+                let _ = s.shutdown().await;
+            });
+        }
+    });
+    Site { addr, hits }
+}

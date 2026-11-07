@@ -4,6 +4,10 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 LOG = sys.argv[1]
 PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 8765
 MB = 1 << 20
+PAGES = {  # tiny HTML pages for the site grabber
+    "/site/": '<html><body><a href="/file.bin">f</a> <a href="/slow.bin">s</a> <a href="page2.html">more</a></body></html>',
+    "/site/page2.html": '<html><body><a href="/vslow.bin">v</a> <a href="/norange.bin">n</a></body></html>',
+}
 FILES = {  # path -> (size, ranges, extra headers, throttle bytes/sec)
     "/file.bin": (40 * MB, True, {}, 0),
     "/norange.bin": (10 * MB, False, {}, 0),
@@ -43,6 +47,17 @@ class H(BaseHTTPRequestHandler):
             self.send_header("Location", "/file.bin")
             self.send_header("Content-Length", "0")
             self.end_headers()
+            return
+        if p in PAGES:
+            body = PAGES[p].encode()
+            rec["status"] = 200
+            log(rec)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            if method == "GET":
+                self.wfile.write(body)
             return
         if p not in FILES:
             rec["status"] = 404

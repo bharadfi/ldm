@@ -1,6 +1,8 @@
 //! zdm-core: segmented, resumable HTTP download engine.
 
 mod engine;
+pub mod grab;
+pub mod hls;
 mod probe;
 #[cfg(any(test, feature = "testserver"))]
 pub mod testserver;
