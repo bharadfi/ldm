@@ -4,6 +4,19 @@ use zdm_proto::State;
 
 pub const CATEGORIES: [&str; 7] = ["Compressed", "Documents", "Music", "Video", "Programs", "Images", "Other"];
 
+/// Full-colour theme icon for a category row in the sidebar.
+pub fn category_icon(c: &str) -> &'static str {
+    match c {
+        "Compressed" => "package-x-generic",
+        "Documents" => "x-office-document",
+        "Music" => "audio-x-generic",
+        "Video" => "video-x-generic",
+        "Programs" => "application-x-executable",
+        "Images" => "image-x-generic",
+        _ => "text-x-generic",
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Section {
     All,

@@ -1,4 +1,4 @@
-# zorin-dm (ZDM)
+# zorin-dm — product name: Linux Download Manager (crates/binaries keep the `zdm` prefix)
 
 **New session? Read `HANDOFF.md` first, then `docs/idm-analysis.md` and `docs/idm-behavior-spec.md`.**
 
@@ -84,4 +84,4 @@ GUI first cut (`crates/zdm-gui`, GTK4/libadwaita, `cargo run -p zdm-gui`): class
 GtkTreeView table, status bar), polls `list` once a second, starts `zdmd` if missing. Uses the deprecated-but-supported
 TreeView on purpose (in-place row updates keep selection). Not yet: per-download progress window, context menu,
 scheduler/queue editor, tray, options, push updates. Verified by launching only; button behaviour judged by the owner.
-
+Product name is **Linux Download Manager** (owner's request); logo = `crates/zdm-gui/assets/logo-*.png` (owner-supplied image). App id `org.linuxdm.Manager`. Colourful light theme in `crates/zdm-gui/assets/style.css`. Feature roadmap: `docs/feature-checklist.md`.

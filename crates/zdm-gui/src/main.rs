@@ -1,4 +1,4 @@
-//! ZDM window, laid out like a classic download manager: toolbar, category tree, table of downloads.
+//! Linux Download Manager window, laid out like a classic download manager: toolbar, category tree, table of downloads.
 //!
 //! The daemon is polled once a second on a background thread (`worker`); the GTK side only applies the
 //! latest snapshot to the table, so nothing here blocks the UI.
@@ -21,7 +21,10 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 use view::Section;
 use zdm_proto::{AddRequest, Request, Response, State, TaskInfo};
 
-const APP_ID: &str = "org.zdm.Manager";
+const APP_ID: &str = "org.linuxdm.Manager";
+const APP_NAME: &str = "Linux Download Manager";
+const LOGO_64: &[u8] = include_bytes!("../assets/logo-64.png");
+const STYLE: &str = include_str!("../assets/style.css");
 
 // Table columns.
 const C_ID: u32 = 0;
@@ -49,6 +52,16 @@ enum Event {
 
 fn main() -> glib::ExitCode {
     let app = adw::Application::builder().application_id(APP_ID).build();
+    app.connect_startup(|_| {
+        // The look is a bright classic one; do not follow a dark system theme.
+        adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceLight);
+        let css = gtk::CssProvider::new();
+        css.load_from_string(STYLE);
+        if let Some(display) = gtk::gdk::Display::default() {
+            gtk::style_context_add_provider_for_display(&display, &css, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
+        }
+        gtk::Window::set_default_icon_name(APP_ID);
+    });
     app.connect_activate(build_ui);
     app.run()
 }
@@ -129,7 +142,7 @@ fn build_ui(app: &adw::Application) {
     let (cmd_tx, cmd_rx) = unbounded_channel::<Request>();
     std::thread::spawn(move || worker(ev_tx, cmd_rx));
 
-    let window = adw::ApplicationWindow::builder().application(app).title("ZDM").default_width(1000).default_height(600).build();
+    let window = adw::ApplicationWindow::builder().application(app).title(APP_NAME).default_width(1080).default_height(600).build();
 
     // ---- download table ----
     let store = gtk::ListStore::new(&[
@@ -163,6 +176,7 @@ fn build_ui(app: &adw::Application) {
     let sorted = gtk::TreeModelSort::with_model(&filter);
     sorted.set_sort_column_id(gtk::SortColumn::Index(C_ADDED_N), gtk::SortType::Descending);
     let table = gtk::TreeView::with_model(&sorted);
+    table.add_css_class("ldm-table");
     table.set_headers_clickable(true);
     table.set_enable_search(true);
     table.set_search_column(C_NAME as i32);
@@ -204,13 +218,13 @@ fn build_ui(app: &adw::Application) {
         sidebar_store.set(&it, &[(0, &label), (1, &icon), (2, &key)]);
         it
     };
-    let all = row(None, "All Downloads", "folder-download-symbolic", "all");
+    let all = row(None, "All Downloads", "folder-download", "all");
     for c in view::CATEGORIES {
-        row(Some(&all), c, "folder-symbolic", &format!("cat:{c}"));
+        row(Some(&all), c, view::category_icon(c), &format!("cat:{c}"));
     }
-    row(None, "Unfinished", "document-open-recent-symbolic", "unfinished");
-    row(None, "Finished", "emblem-ok-symbolic", "finished");
-    let queues_parent = row(None, "Queues", "view-list-symbolic", "queues");
+    row(None, "Unfinished", "appointment-soon", "unfinished");
+    row(None, "Finished", "emblem-default", "finished");
+    let queues_parent = row(None, "Queues", "view-list-compact", "queues");
     let sidebar = gtk::TreeView::with_model(&sidebar_store);
     sidebar.set_headers_visible(false);
     {
@@ -227,40 +241,52 @@ fn build_ui(app: &adw::Application) {
     if let Some(first) = sidebar_store.iter_first() {
         sidebar.selection().select_iter(&first);
     }
+    sidebar.add_css_class("ldm-sidebar");
     let sidebar_scroll = gtk::ScrolledWindow::builder().vexpand(true).width_request(190).child(&sidebar).build();
 
     let paned = gtk::Paned::builder().start_child(&sidebar_scroll).end_child(&table_scroll).position(200).shrink_start_child(false).resize_start_child(false).build();
 
     // ---- chrome ----
-    let status = gtk::Label::builder().xalign(0.0).margin_start(10).margin_end(10).margin_top(4).margin_bottom(4).build();
+    let status = gtk::Label::builder().xalign(0.0).margin_start(10).margin_end(10).margin_top(4).margin_bottom(4).css_classes(["ldm-statusbar"]).build();
     let banner = adw::Banner::builder().title("Starting the download service…").build();
     let toasts = adw::ToastOverlay::new();
     toasts.set_child(Some(&paned));
 
-    let toolbar_box = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(2).margin_start(6).margin_end(6).margin_top(4).margin_bottom(4).build();
-    let make_btn = |icon: &str, label: &str, tip: &str| {
+    let toolbar_box = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(2).css_classes(["ldm-toolbar"]).build();
+    let make_btn = |icon: &str, label: &str, tip: &str, class: &str| {
         let b = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(2).build();
         let img = gtk::Image::from_icon_name(icon);
         img.set_pixel_size(28);
         b.append(&img);
         b.append(&gtk::Label::new(Some(label)));
-        let btn = gtk::Button::builder().child(&b).css_classes(["flat"]).tooltip_text(tip).build();
+        let btn = gtk::Button::builder().child(&b).css_classes(["flat", class]).tooltip_text(tip).build();
         toolbar_box.append(&btn);
         btn
     };
-    let b_add = make_btn("list-add-symbolic", "Add URL", "Add a download link");
-    let b_resume = make_btn("media-playback-start-symbolic", "Resume", "Resume the selected downloads");
-    let b_pause = make_btn("media-playback-pause-symbolic", "Pause", "Pause the selected downloads");
-    let b_pause_all = make_btn("media-playback-stop-symbolic", "Pause All", "Pause every running download");
+    let b_add = make_btn("list-add-symbolic", "Add URL", "Add a download link", "tb-add");
+    let b_resume = make_btn("media-playback-start-symbolic", "Resume", "Resume the selected downloads", "tb-resume");
+    let b_pause = make_btn("media-playback-pause-symbolic", "Pause", "Pause the selected downloads", "tb-pause");
+    let b_pause_all = make_btn("media-playback-stop-symbolic", "Pause All", "Pause every running download", "tb-pauseall");
     toolbar_box.append(&gtk::Separator::new(gtk::Orientation::Vertical));
-    let b_delete = make_btn("user-trash-symbolic", "Delete", "Remove the selected downloads");
-    let b_delete_done = make_btn("edit-clear-all-symbolic", "Delete Completed", "Remove all finished downloads from the list");
+    let b_delete = make_btn("user-trash-symbolic", "Delete", "Remove the selected downloads", "tb-delete");
+    let b_delete_done = make_btn("edit-clear-all-symbolic", "Delete Completed", "Remove all finished downloads from the list", "tb-done");
     toolbar_box.append(&gtk::Separator::new(gtk::Orientation::Vertical));
-    let b_folder = make_btn("folder-open-symbolic", "Open Folder", "Show the selected file in its folder");
+    let b_folder = make_btn("folder-open-symbolic", "Open Folder", "Show the selected file in its folder", "tb-folder");
 
     let tv = adw::ToolbarView::new();
     let top = gtk::Box::builder().orientation(gtk::Orientation::Vertical).build();
-    top.append(&adw::HeaderBar::new());
+    let header = adw::HeaderBar::new();
+    header.add_css_class("ldm-header");
+    {
+        let logo = gtk::Image::from_paintable(gtk::gdk::Texture::from_bytes(&glib::Bytes::from_static(LOGO_64)).ok().as_ref());
+        logo.set_pixel_size(26);
+        let name = gtk::Label::builder().label(APP_NAME).css_classes(["title"]).build();
+        let title = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(8).build();
+        title.append(&logo);
+        title.append(&name);
+        header.set_title_widget(Some(&title));
+    }
+    top.append(&header);
     top.append(&toolbar_box);
     top.append(&banner);
     tv.add_top_bar(&top);
@@ -497,7 +523,7 @@ fn apply_queues(ui: &Ui, names: Vec<String>) {
     }
     for n in &names {
         let it = ui.sidebar_store.append(Some(&ui.queues_parent));
-        ui.sidebar_store.set(&it, &[(0, n), (1, &"media-playlist-consecutive-symbolic"), (2, &format!("q:{n}"))]);
+        ui.sidebar_store.set(&it, &[(0, n), (1, &"media-playlist-consecutive"), (2, &format!("q:{n}"))]);
     }
     ui.sidebar.expand_all();
     if let Section::Queue(q) = &*ui.section.borrow() {
