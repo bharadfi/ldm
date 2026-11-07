@@ -14,6 +14,7 @@ mod menus;
 mod prefs;
 mod progress;
 mod segments;
+mod tray;
 mod view;
 
 use std::cell::RefCell;
@@ -27,6 +28,8 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 use progress::ProgressWin;
 use view::Section;
 use zdm_proto::{AddRequest, QueueInfo, Request, Response, Settings, State, TaskInfo};
+
+static BACKGROUND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 const APP_ID: &str = "org.linuxdm.Manager";
 const APP_NAME: &str = "Linux Download Manager";
@@ -76,7 +79,9 @@ fn main() -> glib::ExitCode {
             selftest(&ui, base);
         }
     });
-    app.run()
+    // `--background` (used by the autostart entry) starts hidden in the tray; GApplication must not parse it.
+    BACKGROUND.store(std::env::args().any(|a| a == "--background"), std::sync::atomic::Ordering::Relaxed);
+    app.run_with_args(&["zdm-gui"])
 }
 
 /// Background thread: poll the daemon, run requests sent from the UI, start the daemon if it is missing.
@@ -148,6 +153,10 @@ pub struct Ui {
     pub settings: RefCell<Option<Settings>>,
     pub prefs: RefCell<prefs::GuiPrefs>,
     pub seen_first: std::cell::Cell<bool>,
+    pub tray: RefCell<Option<ksni::blocking::Handle<tray::LdmTray>>>,
+    pub last_states: RefCell<HashMap<i64, State>>,
+    pub notify_ready: std::cell::Cell<bool>,
+    pub last_tip: RefCell<String>,
     pub toolbar_box: gtk::Box,
     pub sidebar_scroll: gtk::ScrolledWindow,
     pub latest: RefCell<Vec<TaskInfo>>,
@@ -345,6 +354,10 @@ fn build_ui(app: &adw::Application) -> Rc<Ui> {
         settings: RefCell::default(),
         prefs: RefCell::new(prefs::load()),
         seen_first: std::cell::Cell::new(false),
+        tray: RefCell::default(),
+        last_states: RefCell::default(),
+        notify_ready: std::cell::Cell::new(false),
+        last_tip: RefCell::default(),
         toolbar_box: toolbar_box.clone(),
         sidebar_scroll: sidebar_scroll.clone(),
         latest: RefCell::default(),
@@ -449,6 +462,7 @@ fn build_ui(app: &adw::Application) -> Rc<Ui> {
                         banner_hide(&ui);
                         let fresh = apply_tasks(&ui, &tasks);
                         menus::refresh_actions(&ui);
+                        notify_and_tray(&ui, &tasks);
                         let first = !ui.seen_first.replace(true);
                         if !first && ui.prefs.borrow().auto_progress {
                             let now = glib::real_time() / 1_000_000;
@@ -474,7 +488,10 @@ fn build_ui(app: &adw::Application) -> Rc<Ui> {
             }
         });
     }
-    window.present();
+    let tray_ok = install_tray(&ui, app);
+    if !(tray_ok && BACKGROUND.load(std::sync::atomic::Ordering::Relaxed)) {
+        window.present();
+    }
     ui
 }
 
@@ -919,4 +936,98 @@ fn selftest(ui: &Rc<Ui>, base: String) {
         eprintln!("SELFTEST rows left: {left}");
         std::process::exit(if left == 0 { 0 } else { 3 });
     }));
+}
+
+/// Create the tray icon. Returns false when the desktop has no tray (the window then behaves normally).
+fn install_tray(ui: &Rc<Ui>, app: &adw::Application) -> bool {
+    // Clicking a notification raises the window.
+    let show = gio::SimpleAction::new("show-window", None);
+    let w = ui.window.clone();
+    show.connect_activate(move |_, _| {
+        w.set_visible(true);
+        w.present();
+    });
+    app.add_action(&show);
+
+    if std::env::var_os("LDM_NO_TRAY").is_some() || std::env::var_os("LDM_SELFTEST").is_some() {
+        return false;
+    }
+    let (tx, rx) = async_channel::unbounded();
+    let Some(handle) = tray::spawn(tx) else { return false };
+    *ui.tray.borrow_mut() = Some(handle);
+    std::mem::forget(app.hold()); // keep running in the tray after the window is closed
+
+    let u = ui.clone();
+    glib::spawn_future_local(async move {
+        while let Ok(cmd) = rx.recv().await {
+            match cmd {
+                tray::TrayCmd::Show => {
+                    u.window.set_visible(true);
+                    u.window.present();
+                }
+                tray::TrayCmd::PauseAll => {
+                    for t in u.latest.borrow().iter().filter(|t| matches!(t.state, State::Running | State::Queued)) {
+                        send(&u, Request::Pause { id: t.id });
+                    }
+                }
+                tray::TrayCmd::ResumeAll => {
+                    for t in u.latest.borrow().iter().filter(|t| matches!(t.state, State::Paused | State::Failed)) {
+                        send(&u, Request::Resume { id: t.id });
+                    }
+                }
+                tray::TrayCmd::Quit => {
+                    if let Some(a) = u.window.application() {
+                        a.quit();
+                    }
+                }
+            }
+        }
+    });
+    let u = ui.clone();
+    ui.window.connect_close_request(move |w| {
+        if u.prefs.borrow().close_to_tray && u.tray.borrow().is_some() {
+            w.set_visible(false);
+            glib::Propagation::Stop
+        } else {
+            if let Some(a) = w.application() {
+                a.quit(); // the tray keeps an application hold; without this the process would linger
+            }
+            glib::Propagation::Proceed
+        }
+    });
+    true
+}
+
+/// After each snapshot: desktop notifications for finished/failed downloads and the tray tooltip.
+fn notify_and_tray(ui: &Rc<Ui>, tasks: &[TaskInfo]) {
+    let now = glib::real_time() / 1_000_000;
+    if ui.notify_ready.replace(true) && ui.prefs.borrow().notifications {
+        if let Some(app) = ui.window.application() {
+            for n in helpers::transitions(&ui.last_states.borrow(), tasks, now) {
+                let (id, title, body) = match n {
+                    helpers::Notice::Done { id, name } => (format!("done-{id}"), "Download complete".to_string(), name),
+                    helpers::Notice::Failed { id, name, error } => (format!("failed-{id}"), "Download failed".to_string(), format!("{name}: {error}")),
+                };
+                let note = gio::Notification::new(&title);
+                note.set_body(Some(&body));
+                note.set_icon(&gio::ThemedIcon::new(APP_ID));
+                note.set_default_action("app.show-window");
+                app.send_notification(Some(&id), &note);
+            }
+        }
+    }
+    *ui.last_states.borrow_mut() = tasks.iter().map(|t| (t.id, t.state)).collect();
+
+    if let Some(handle) = &*ui.tray.borrow() {
+        let (active, total) = {
+            let sp = ui.speeds.borrow();
+            (sp.values().filter(|e| e.2 > 0.0).count(), sp.values().map(|e| e.2).sum::<f64>())
+        };
+        let waiting = tasks.iter().filter(|t| t.state == State::Queued).count();
+        let tip = if active > 0 { format!("{active} downloading · {}/s", fmt::bytes(total as u64)) } else if waiting > 0 { format!("{waiting} waiting") } else { "Idle".into() };
+        if *ui.last_tip.borrow() != tip {
+            tray::set_tooltip(handle, &tip);
+            *ui.last_tip.borrow_mut() = tip;
+        }
+    }
 }

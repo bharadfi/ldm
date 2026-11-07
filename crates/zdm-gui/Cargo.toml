@@ -17,3 +17,4 @@ adw = { package = "libadwaita", version = "0.7", features = ["v1_5"] }
 async-channel = "2"
 serde.workspace = true
 serde_json.workspace = true
+ksni = { version = "0.3", features = ["blocking"] }

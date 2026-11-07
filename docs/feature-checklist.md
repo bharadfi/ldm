@@ -27,7 +27,8 @@ observation only, our own icons/strings/code. `[x]` done, `[~]` partly, `[ ]` no
 - [x] Properties dialog (read-only), batch add from text (clipboard prefill), import/export link list, About; [ ] "Add URL" fields for auth/referer/category/save-as
 - [~] Options dialog: save-to folder, connections (1-32), per-download speed limit, proxy, auto progress window, browser-helper installer; [ ] per-category folders, file types, sounds, language
 - [x] Menu bar (Tasks/File/Downloads/View/Help), shortcuts, toolbar with Options/Scheduler/Start-Stop Queue, view toggles
-- [ ] Tray icon + menu, minimise to tray, notifications on completion/error, search/filter box
+- [x] Tray icon (StatusNotifierItem) with menu + speed tooltip, close-to-tray, `--background`, optional start at login, notifications on finish/error
+- [ ] Search/filter box, tray icon animation, sounds
 - [ ] Push updates from the daemon instead of polling
 
 ## Browser integration

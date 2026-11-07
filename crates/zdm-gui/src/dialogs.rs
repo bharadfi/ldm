@@ -44,6 +44,16 @@ pub fn options_dialog(ui: &Rc<Ui>) {
     g.add(&root);
     g.add(&auto);
     page.add(&g);
+    let gi = adw::PreferencesGroup::builder().title("Interface").build();
+    let tray_note = if ui.tray.borrow().is_some() { "" } else { "No tray was found on this desktop, so closing the window will quit the app." };
+    let to_tray = adw::SwitchRow::builder().title("Closing the window keeps the app running in the tray").subtitle(tray_note).active(prefs0.close_to_tray).build();
+    let notes = adw::SwitchRow::builder().title("Show a notification when a download finishes or fails").active(prefs0.notifications).build();
+    let autostart0 = prefs::autostart_enabled();
+    let autostart = adw::SwitchRow::builder().title("Start with the computer (hidden in the tray)").active(autostart0).build();
+    gi.add(&to_tray);
+    gi.add(&notes);
+    gi.add(&autostart);
+    page.add(&gi);
     dialog.add(&page);
 
     // Connection
@@ -93,7 +103,12 @@ pub fn options_dialog(ui: &Rc<Ui>) {
             send(&u, Request::SetSettings(s));
             toast(&u, "Options saved. They apply to downloads started from now on.");
         }
-        let gp = GuiPrefs { auto_progress: auto.is_active() };
+        let gp = GuiPrefs { auto_progress: auto.is_active(), close_to_tray: to_tray.is_active(), notifications: notes.is_active() };
+        if autostart.is_active() != autostart0 {
+            if let Err(e) = prefs::set_autostart(autostart.is_active()) {
+                toast(&u, &format!("Could not change the autostart entry: {e}"));
+            }
+        }
         if gp != prefs0 {
             prefs::save(&gp);
             *u.prefs.borrow_mut() = gp;

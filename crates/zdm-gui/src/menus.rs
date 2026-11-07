@@ -87,7 +87,11 @@ pub fn install(ui: &Rc<Ui>, app: &adw::Application, slot: &gtk::Box) {
     mk("batch", Box::new(dialogs::batch_dialog));
     mk("import", Box::new(dialogs::import_list));
     mk("export", Box::new(dialogs::export_list));
-    mk("quit", Box::new(|u| u.window.close()));
+    mk("quit", Box::new(|u| {
+        if let Some(a) = u.window.application() {
+            a.quit();
+        }
+    }));
     mk("pause-all", Box::new(|u| {
         for t in u.latest.borrow().iter().filter(|t| matches!(t.state, State::Running | State::Queued)) {
             send(u, Request::Pause { id: t.id });

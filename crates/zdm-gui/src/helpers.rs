@@ -1,6 +1,8 @@
 //! Small pure helpers for the dialogs (unit-tested, no GTK).
 
-use zdm_proto::Window;
+use std::collections::HashMap;
+
+use zdm_proto::{State, TaskInfo, Window};
 
 /// URLs from pasted text: one per line (or whitespace separated), http/https only, duplicates dropped.
 pub fn parse_urls(text: &str) -> Vec<String> {
@@ -45,6 +47,32 @@ pub fn window_label(w: &Option<Window>) -> String {
     }
 }
 
+#[derive(Debug, PartialEq)]
+pub enum Notice {
+    Done { id: i64, name: String },
+    Failed { id: i64, name: String, error: String },
+}
+
+/// Which tasks deserve a desktop notification, given the states seen on the previous snapshot.
+/// A task never seen before counts only if it is new (added in the last minute) and already finished.
+pub fn transitions(prev: &HashMap<i64, State>, tasks: &[TaskInfo], now: i64) -> Vec<Notice> {
+    let mut out = vec![];
+    for t in tasks {
+        let before = prev.get(&t.id).copied();
+        let name = crate::fmt::display_name(t);
+        match t.state {
+            State::Completed if before.is_some_and(|b| b != State::Completed) || (before.is_none() && now - t.added_at < 60) => {
+                out.push(Notice::Done { id: t.id, name });
+            }
+            State::Failed if before.is_some_and(|b| b != State::Failed) || (before.is_none() && now - t.added_at < 60) => {
+                out.push(Notice::Failed { id: t.id, name, error: t.error.clone().unwrap_or_else(|| "unknown error".into()) });
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -65,5 +93,26 @@ mod tests {
         assert_eq!(minutes(7, 30), 450);
         assert_eq!(window_label(&None), "runs any time");
         assert_eq!(window_label(&Some(Window { start_min: 60, end_min: 420, days: 0x7f })), "01:00–07:00, every day");
+    }
+
+    fn task(id: i64, state: State, added_at: i64) -> TaskInfo {
+        TaskInfo { id, url: format!("http://x/{id}.zip"), filename: None, dest: None, category: None, queue: "Main".into(), state, size: None, downloaded: 0, error: Some("boom".into()), added_at }
+    }
+
+    #[test]
+    fn notices_only_on_a_change_to_finished_or_failed() {
+        let prev: HashMap<i64, State> = [(1, State::Running), (2, State::Completed), (3, State::Running), (4, State::Failed)].into();
+        let tasks = [task(1, State::Completed, 0), task(2, State::Completed, 0), task(3, State::Failed, 0), task(4, State::Failed, 0), task(5, State::Running, 0)];
+        let n = transitions(&prev, &tasks, 1000);
+        assert_eq!(n.len(), 2);
+        assert!(matches!(&n[0], Notice::Done { id: 1, name } if name == "http://x/1.zip"));
+        assert!(matches!(&n[1], Notice::Failed { id: 3, error, .. } if error == "boom"));
+    }
+
+    #[test]
+    fn unseen_task_notifies_only_if_new() {
+        let prev = HashMap::new();
+        assert_eq!(transitions(&prev, &[task(9, State::Completed, 990)], 1000).len(), 1);
+        assert!(transitions(&prev, &[task(9, State::Completed, 100)], 1000).is_empty(), "old history on startup must stay quiet");
     }
 }

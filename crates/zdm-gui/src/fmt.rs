@@ -21,6 +21,11 @@ pub fn eta(secs: u64) -> String {
     }
 }
 
+/// Best name to show for a task: saved file name, else the server's name, else the link.
+pub fn display_name(t: &TaskInfo) -> String {
+    t.dest.as_deref().and_then(|d| std::path::Path::new(d).file_name()).map(|n| n.to_string_lossy().into_owned()).or_else(|| t.filename.clone()).unwrap_or_else(|| t.url.clone())
+}
+
 /// 0..=100 for the progress cell; unknown size shows 0.
 pub fn percent(t: &TaskInfo) -> i32 {
     if t.state == State::Completed {

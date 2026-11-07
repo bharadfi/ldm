@@ -91,4 +91,7 @@ Headless GUI check: start `gtk4-broadwayd :5`, then run
 `G_DEBUG=fatal-criticals GDK_BACKEND=broadway BROADWAY_DISPLAY=:5 LDM_SELFTEST=http://127.0.0.1:8765 target/release/zdm-gui`
 (needs tools/rangesrv.py + zdmd running; exits 0 if add/delete/dialogs survive). It caught a real crash: never keep
 GtkListStore row handles across a `remove` (see `row_index`/`apply_tasks`); the debug build hid it, release crashed.
+Tray: `crates/zdm-gui/src/tray.rs` (ksni, blocking API; shown by GNOME AppIndicator). Notifications use GApplication
+(`org.gtk.Notifications` on GNOME; verified with `busctl --user monitor org.gtk.Notifications`). `LDM_NO_TRAY=1` disables the
+tray; the self-test skips it. `zdm-gui --background` starts hidden (autostart entry in ~/.config/autostart, toggled in Options).
 
