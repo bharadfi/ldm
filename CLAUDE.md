@@ -80,3 +80,8 @@ libgtk-4-dev/libadwaita-1-dev yet (needs sudo apt), so extension-in-browser and 
 Browser takeover verified in a real browser on Linux (Zorin 18, Mozilla-deb Firefox 159, temporary add-on): a click on a
 download link was cancelled in Firefox and completed by ZDM (UA forwarded, files numbered `name (N).ext`). Chrome/Brave
 and the systemd unit are still untested. GTK dev libs (libgtk-4-dev 4.14, libadwaita 1.5) are now installed.
+GUI first cut (`crates/zdm-gui`, GTK4/libadwaita, `cargo run -p zdm-gui`): classic layout (toolbar, category tree, sortable
+GtkTreeView table, status bar), polls `list` once a second, starts `zdmd` if missing. Uses the deprecated-but-supported
+TreeView on purpose (in-place row updates keep selection). Not yet: per-download progress window, context menu,
+scheduler/queue editor, tray, options, push updates. Verified by launching only; button behaviour judged by the owner.
+

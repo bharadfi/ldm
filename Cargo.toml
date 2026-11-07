@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/zdm-core", "crates/zdm-proto", "crates/zdmd", "crates/zdm-cli", "crates/zdm-nmhost"]
+members = ["crates/zdm-core", "crates/zdm-proto", "crates/zdmd", "crates/zdm-cli", "crates/zdm-nmhost", "crates/zdm-gui"]
 
 [workspace.package]
 version = "0.1.0"
