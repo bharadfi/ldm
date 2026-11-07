@@ -120,7 +120,7 @@ async fn same_file_name_gets_numbered() {
 async fn queue_limit_is_respected() {
     let srv = testserver::start(server_cfg(2 * MIB, "f.bin")).await;
     let env = Env::new(Some(2 * MIB)); // ~1 s per task
-    env.m.queue_set(&QueueInfo { name: "Main".into(), max_parallel: 2, window: None }).unwrap();
+    env.m.queue_set(&QueueInfo { name: "Main".into(), max_parallel: 2, window: None, limit_kib: 0 }).unwrap();
     for i in 0..5 {
         env.add(srv.url(&format!("/{i}")));
     }
@@ -183,7 +183,7 @@ async fn time_window_holds_and_releases_tasks() {
     let env = Env::new(None);
     // Only 22:00-23:00 on Wednesdays (weekday 2); the fake clock says Wednesday noon.
     env.m
-        .queue_set(&QueueInfo { name: "Main".into(), max_parallel: 3, window: Some(Window { start_min: 22 * 60, end_min: 23 * 60, days: 1 << 2 }) })
+        .queue_set(&QueueInfo { name: "Main".into(), max_parallel: 3, window: Some(Window { start_min: 22 * 60, end_min: 23 * 60, days: 1 << 2 }), limit_kib: 0 })
         .unwrap();
     env.add(srv.url("/w"));
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -201,7 +201,7 @@ async fn closing_window_stops_running_task_then_resumes_it() {
     let srv = testserver::start(server_cfg(size, "n.bin")).await;
     let env = Env::new(Some(2 * MIB));
     env.m
-        .queue_set(&QueueInfo { name: "Main".into(), max_parallel: 3, window: Some(Window { start_min: 10 * 60, end_min: 14 * 60, days: 0x7f }) })
+        .queue_set(&QueueInfo { name: "Main".into(), max_parallel: 3, window: Some(Window { start_min: 10 * 60, end_min: 14 * 60, days: 0x7f }), limit_kib: 0 })
         .unwrap();
     env.add(srv.url("/n"));
     env.until("running", |ts| ts[0].state == State::Running && ts[0].downloaded > 0).await;
@@ -279,7 +279,7 @@ fn headers_and_queues_persist() {
     {
         let s = Store::open(&db).unwrap();
         s.insert_task(&NewTask { url: "http://x/y", filename: Some("n.bin"), dest_dir: None, queue: "Main", state: State::Paused, referer: Some("http://ref/"), user_agent: Some("UA/1"), headers: &hdrs }).unwrap();
-        s.set_queue(&QueueInfo { name: "Night".into(), max_parallel: 2, window: Some(Window { start_min: 60, end_min: 360, days: 0x7f }) }).unwrap();
+        s.set_queue(&QueueInfo { name: "Night".into(), max_parallel: 2, window: Some(Window { start_min: 60, end_min: 360, days: 0x7f }), limit_kib: 0 }).unwrap();
     }
     let s = Store::open(&db).unwrap();
     let t = s.tasks().unwrap().remove(0);
@@ -314,7 +314,7 @@ async fn settings_apply_persist_and_reject_bad_values() {
 #[tokio::test]
 async fn move_task_between_queues() {
     let env = Env::new(None);
-    env.m.queue_set(&QueueInfo { name: "Night".into(), max_parallel: 1, window: None }).unwrap();
+    env.m.queue_set(&QueueInfo { name: "Night".into(), max_parallel: 1, window: None, limit_kib: 0 }).unwrap();
     let t = env.m.add(AddRequest { url: "http://127.0.0.1:1/x.bin".into(), start: false, ..Default::default() }).unwrap();
     env.m.move_task(t.id, "Night").unwrap();
     assert_eq!(env.m.get(t.id).unwrap().queue, "Night");
@@ -330,9 +330,9 @@ async fn grab_request_finds_files_through_the_protocol() {
     r.insert("/more.html".into(), ("text/html".into(), br#"<a href="c.iso">c</a>"#.to_vec()));
     let site = serve_site(r).await;
     let env = Env::new(None);
-    let links = env.m.grab(zdm_proto::GrabRequest { url: site.url("/"), depth: 1, same_host: true, extensions: vec![".ISO".into()], max_pages: 0 }).await.unwrap();
+    let links = env.m.grab(zdm_proto::GrabRequest { url: site.url("/"), depth: 1, same_host: true, extensions: vec![".ISO".into()], max_pages: 0, include: vec![], exclude: vec![] }).await.unwrap();
     assert_eq!(links.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(), ["a.iso", "c.iso"]);
-    assert!(env.m.grab(zdm_proto::GrabRequest { url: "ftp://x".into(), depth: 0, same_host: true, extensions: vec![], max_pages: 0 }).await.is_err());
+    assert!(env.m.grab(zdm_proto::GrabRequest { url: "ftp://x".into(), depth: 0, same_host: true, extensions: vec![], max_pages: 0, include: vec![], exclude: vec![] }).await.is_err());
     env.stop().await;
 }
 
@@ -567,5 +567,148 @@ async fn ftp_links_download_with_and_without_login() {
     assert!(!serde_json::to_string(&tasks).unwrap().contains("hunter2"));
     // unsupported schemes are still refused
     assert!(env.m.add(AddRequest { url: "gopher://x/y".into(), start: true, ..Default::default() }).is_err());
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn new_address_for_a_paused_download_keeps_its_progress() {
+    let size = 8 * MIB;
+    let a = testserver::start(server_cfg(size, "big.bin")).await;
+    let b = testserver::start(server_cfg(size, "big.bin")).await; // a mirror: same size, same validator
+    let env = Env::new(Some(2 * MIB));
+    let id = env.add(a.url("/big")).id;
+    env.until("some progress", |ts| ts[0].downloaded > MIB / 2).await;
+    env.m.pause(id).unwrap();
+    env.until("stopped", |ts| ts[0].state == State::Paused).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(env.m.set_url(id, "gopher://nope").is_err());
+    env.m.set_url(id, &b.url("/big")).unwrap();
+    assert!(env.m.get(id).unwrap().url.starts_with(&b.url("")));
+    env.m.resume(id).unwrap();
+    env.until("completion", |ts| ts[0].state == State::Completed).await;
+    let t = env.m.get(id).unwrap();
+    assert_eq!(std::fs::read(t.dest.unwrap()).unwrap(), expected(size));
+    let asked: u64 = b
+        .requests()
+        .iter()
+        .filter_map(|r| r.range.as_deref())
+        .filter(|r| *r != "bytes=0-0")
+        .filter_map(|r| {
+            let (x, y) = r.strip_prefix("bytes=")?.split_once('-')?;
+            Some(y.parse::<u64>().ok()? - x.parse::<u64>().ok()? + 1)
+        })
+        .sum();
+    assert!(asked > 0 && asked < size - MIB / 4, "the mirror must only be asked for the missing part: {asked} of {size}");
+    // a running or finished task cannot be re-addressed
+    assert!(env.m.set_url(id, &b.url("/big")).is_err());
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_download_gets_a_new_address_and_restarts() {
+    let srv = testserver::start(server_cfg(MIB, "ok.bin")).await;
+    let env = Env::new(None);
+    let mut s = env.m.settings();
+    s.auto_retries = 0;
+    env.m.set_settings(s).unwrap();
+    let id = env.add("http://127.0.0.1:1/dead.bin".into()).id;
+    env.until("failure", |ts| ts[0].state == State::Failed).await;
+    env.m.set_url(id, &srv.url("/ok.bin")).unwrap();
+    env.until("completion", |ts| ts[0].state == State::Completed).await;
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn move_to_top_changes_the_start_order() {
+    let srv = testserver::start(server_cfg(MIB, "q.bin")).await;
+    let env = Env::new(Some(MIB)); // each takes about a second
+    env.m.queue_set(&QueueInfo { name: "One".into(), max_parallel: 1, window: None, limit_kib: 0 }).unwrap();
+    let add = |p: &str| env.m.add(AddRequest { url: srv.url(p), queue: Some("One".into()), start: true, ..Default::default() }).unwrap().id;
+    let (first, second, third) = (add("/1"), add("/2"), add("/3"));
+    env.until("first running", |ts| ts.iter().any(|t| t.id == first && t.state == State::Running)).await;
+    env.m.move_to_top(third).unwrap();
+    let mut order = vec![];
+    let t0 = Instant::now();
+    while order.len() < 3 && t0.elapsed() < Duration::from_secs(20) {
+        for t in env.m.list().unwrap() {
+            if t.state == State::Completed && !order.contains(&t.id) {
+                order.push(t.id);
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(order, vec![first, third, second]);
+    assert!(env.m.move_to_top(first).is_err(), "finished tasks cannot be moved");
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn existing_file_names_follow_the_chosen_policy() {
+    let env = Env::new(None);
+    let get = |size: u64| async move { testserver::start(server_cfg(size, "same.bin")).await };
+    let (s1, s2, s3) = (get(MIB).await, get(2 * MIB).await, get(3 * MIB).await);
+
+    env.add(s1.url("/a"));
+    env.until("first", |t| t.len() == 1 && t[0].state == State::Completed).await;
+    let first = env.m.list().unwrap()[0].dest.clone().unwrap();
+
+    // overwrite: same name, new content
+    let mut s = env.m.settings();
+    s.on_exists = "overwrite".into();
+    env.m.set_settings(s.clone()).unwrap();
+    env.add(s2.url("/b"));
+    env.until("second", |t| t.len() == 2 && t.iter().all(|x| x.state == State::Completed)).await;
+    let second = env.m.list().unwrap()[1].dest.clone().unwrap();
+    assert_eq!(first, second, "overwrite reuses the name");
+    assert_eq!(std::fs::read(&second).unwrap(), expected(2 * MIB));
+
+    // skip: refused, and not retried
+    s.on_exists = "skip".into();
+    env.m.set_settings(s.clone()).unwrap();
+    env.add(s3.url("/c"));
+    env.until("skipped", |t| t.len() == 3 && t[2].state == State::Failed).await;
+    let t = env.m.list().unwrap()[2].clone();
+    assert!(t.error.as_deref().unwrap().contains("already exists"), "{:?}", t.error);
+    assert_eq!(env.m.retry_count(), 0);
+    assert_eq!(std::fs::read(&first).unwrap(), expected(2 * MIB), "the existing file is untouched");
+
+    // rename (the default): a numbered name
+    s.on_exists = "rename".into();
+    env.m.set_settings(s).unwrap();
+    env.m.resume(t.id).unwrap();
+    env.until("renamed", |t| t[2].state == State::Completed).await;
+    assert!(env.m.list().unwrap()[2].dest.clone().unwrap().ends_with("same (1).bin"));
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_queue_can_have_its_own_speed_limit() {
+    let srv = testserver::start(server_cfg(MIB, "x.bin")).await;
+    let env = Env::new(None);
+    env.m.queue_set(&QueueInfo { name: "Main".into(), max_parallel: 3, window: None, limit_kib: 256 }).unwrap();
+    assert_eq!(env.m.queue_list().unwrap().iter().find(|q| q.name == "Main").unwrap().limit_kib, 256);
+    let t0 = Instant::now();
+    env.add(srv.url("/1"));
+    env.until("done", |t| t.len() == 1 && t[0].state == State::Completed).await;
+    assert!(t0.elapsed() >= Duration::from_millis(2500), "1 MiB at 256 KiB/s needs ~4 s, took {:?}", t0.elapsed());
+    env.m.queue_set(&QueueInfo { name: "Main".into(), max_parallel: 3, window: None, limit_kib: 0 }).unwrap();
+    let t1 = Instant::now();
+    env.add(srv.url("/2"));
+    env.until("done again", |t| t.len() == 2 && t.iter().all(|x| x.state == State::Completed)).await;
+    assert!(t1.elapsed() < Duration::from_millis(2000), "{:?}", t1.elapsed());
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn custom_file_types_decide_the_category_folder() {
+    let srv = testserver::start(server_cfg(MIB / 4, "notes.bin")).await;
+    let env = Env::new(None);
+    let mut s = env.m.settings();
+    s.category_exts.insert("Documents".into(), vec!["bin".into(), "txt".into()]);
+    env.m.set_settings(s).unwrap();
+    env.add(srv.url("/n"));
+    let tasks = env.until("done", |t| t.len() == 1 && t[0].state == State::Completed).await;
+    assert_eq!(tasks[0].category.as_deref(), Some("Documents"));
+    assert_eq!(Path::new(tasks[0].dest.as_deref().unwrap()), env.dl().join("Documents").join("notes.bin"));
     env.stop().await;
 }

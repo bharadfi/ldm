@@ -94,6 +94,13 @@ impl Store {
         if !has_ua {
             db.execute("ALTER TABLE tasks ADD COLUMN user_agent TEXT", [])?;
         }
+        // Additive migrations: manual start order, per-queue speed limit.
+        if !db.prepare("SELECT 1 FROM pragma_table_info('tasks') WHERE name='sort_key'")?.exists([])? {
+            db.execute("ALTER TABLE tasks ADD COLUMN sort_key INTEGER", [])?;
+        }
+        if !db.prepare("SELECT 1 FROM pragma_table_info('queues') WHERE name='limit_kib'")?.exists([])? {
+            db.execute("ALTER TABLE queues ADD COLUMN limit_kib INTEGER NOT NULL DEFAULT 0", [])?;
+        }
         db.execute("INSERT OR IGNORE INTO queues(name,max_parallel,days) VALUES(?,3,127)", [DEFAULT_QUEUE])?;
         let s = Self { db };
         // A previous daemon run may have died mid-download; those tasks resume from their sidecars.
@@ -120,7 +127,7 @@ impl Store {
     }
 
     pub fn queued_in(&self, queue: &str, limit: usize) -> Result<Vec<i64>> {
-        let mut st = self.db.prepare("SELECT id FROM tasks WHERE queue=? AND state='queued' ORDER BY id LIMIT ?")?;
+        let mut st = self.db.prepare("SELECT id FROM tasks WHERE queue=? AND state='queued' ORDER BY COALESCE(sort_key,id), id LIMIT ?")?;
         let ids = st.query_map(params![queue, limit as i64], |r| r.get(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(ids)
     }
@@ -148,6 +155,20 @@ impl Store {
         Ok(())
     }
 
+    /// Start `id` before every other task of its queue.
+    pub fn move_to_top(&self, id: i64) -> Result<()> {
+        self.db.execute(
+            "UPDATE tasks SET sort_key=(SELECT MIN(COALESCE(sort_key,id)) FROM tasks WHERE queue=(SELECT queue FROM tasks WHERE id=?1))-1 WHERE id=?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_url(&self, id: i64, url: &str, headers: &[(String, String)]) -> Result<()> {
+        self.db.execute("UPDATE tasks SET url=?, headers=? WHERE id=?", params![url, serde_json::to_string(headers)?, id])?;
+        Ok(())
+    }
+
     pub fn set_task_queue(&self, id: i64, queue: &str) -> Result<()> {
         self.db.execute("UPDATE tasks SET queue=? WHERE id=?", params![queue, id])?;
         Ok(())
@@ -166,7 +187,7 @@ impl Store {
     }
 
     pub fn queues(&self) -> Result<Vec<QueueInfo>> {
-        let mut st = self.db.prepare("SELECT name,max_parallel,win_start,win_end,days FROM queues ORDER BY name")?;
+        let mut st = self.db.prepare("SELECT name,max_parallel,win_start,win_end,days,limit_kib FROM queues ORDER BY name")?;
         let v = st
             .query_map([], |r| {
                 let (s, e): (Option<u32>, Option<u32>) = (r.get(2)?, r.get(3)?);
@@ -174,6 +195,7 @@ impl Store {
                     name: r.get(0)?,
                     max_parallel: r.get(1)?,
                     window: s.zip(e).map(|(start_min, end_min)| Window { start_min, end_min, days: r.get::<_, u8>(4).unwrap_or(127) }),
+                    limit_kib: r.get::<_, i64>(5).unwrap_or(0).max(0) as u64,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -197,10 +219,10 @@ impl Store {
             }
         }
         self.db.execute(
-            "INSERT INTO queues(name,max_parallel,win_start,win_end,days) VALUES(?,?,?,?,?)
+            "INSERT INTO queues(name,max_parallel,win_start,win_end,days,limit_kib) VALUES(?,?,?,?,?,?)
              ON CONFLICT(name) DO UPDATE SET max_parallel=excluded.max_parallel, win_start=excluded.win_start,
-             win_end=excluded.win_end, days=excluded.days",
-            params![q.name, q.max_parallel, q.window.map(|w| w.start_min), q.window.map(|w| w.end_min), q.window.map_or(127, |w| w.days)],
+             win_end=excluded.win_end, days=excluded.days, limit_kib=excluded.limit_kib",
+            params![q.name, q.max_parallel, q.window.map(|w| w.start_min), q.window.map(|w| w.end_min), q.window.map_or(127, |w| w.days), q.limit_kib as i64],
         )?;
         Ok(())
     }

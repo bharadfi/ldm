@@ -108,6 +108,9 @@ pub struct QueueInfo {
     /// Maximum tasks of this queue downloading at once.
     pub max_parallel: u32,
     pub window: Option<Window>,
+    /// Speed limit shared by the running downloads of this queue in KiB/s; 0 = none.
+    #[serde(default)]
+    pub limit_kib: u64,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -143,6 +146,12 @@ pub struct GrabRequest {
     /// Page limit (the daemon caps it at 300).
     #[serde(default)]
     pub max_pages: u32,
+    /// Only links matching one of these patterns (`*` = anything; plain text = contained anywhere). Empty = all.
+    #[serde(default)]
+    pub include: Vec<String>,
+    /// Skip links matching one of these patterns.
+    #[serde(default)]
+    pub exclude: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -177,7 +186,28 @@ pub struct Settings {
     /// Shell command run after each finished download (for example a virus scan). The file is in `$ZDM_FILE`.
     #[serde(default)]
     pub post_command: Option<String>,
+    /// When the file name is already taken: `rename` (name (1).ext), `overwrite` or `skip` (the download fails).
+    #[serde(default = "default_on_exists")]
+    pub on_exists: String,
+    /// Replacement file types (extensions without the dot) of a category, instead of the built-in list.
+    #[serde(default)]
+    pub category_exts: std::collections::BTreeMap<String, Vec<String>>,
 }
+
+fn default_on_exists() -> String {
+    "rename".into()
+}
+
+/// Built-in file types of each category; anything else is "Other".
+pub const CATEGORY_TABLE: &[(&str, &[&str])] = &[
+    ("Compressed", &["zip", "7z", "rar", "gz", "bz2", "xz", "zst", "tar", "tgz", "z", "cab", "lzh", "arj"]),
+    ("Documents", &["pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "txt", "epub", "rtf", "csv"]),
+    ("Music", &["mp3", "flac", "aac", "ogg", "opus", "wav", "wma", "m4a", "mpa"]),
+    ("Video", &["mp4", "mkv", "avi", "mov", "wmv", "webm", "flv", "m4v", "mpg", "mpeg", "3gp", "ogv", "ts"]),
+    ("Programs", &["exe", "msi", "deb", "rpm", "appimage", "apk", "iso", "img", "bin", "sh", "run", "flatpakref", "snap"]),
+    ("Images", &["jpg", "jpeg", "png", "gif", "bmp", "webp", "svg", "tif", "tiff", "ico"]),
+];
+pub const OTHER_CATEGORY: &str = "Other";
 
 fn default_auto_retries() -> u32 {
     3
@@ -225,6 +255,14 @@ impl Settings {
                 return Err(format!("the folder for category \"{cat}\" must be an absolute path"));
             }
         }
+        if !["rename", "overwrite", "skip"].contains(&self.on_exists.as_str()) {
+            return Err("on_exists must be rename, overwrite or skip".into());
+        }
+        for (cat, exts) in &self.category_exts {
+            if cat.trim().is_empty() || exts.iter().any(|e| e.is_empty() || e.len() > 12 || !e.chars().all(|c| c.is_ascii_alphanumeric())) {
+                return Err(format!("file types of category \"{cat}\" must be plain extensions such as zip or mp3"));
+            }
+        }
         if let Some(c) = &self.post_command {
             if c.trim().is_empty() || c.len() > 1000 || c.contains('\0') {
                 return Err("the after-download command must be 1 to 1000 characters".into());
@@ -250,6 +288,10 @@ pub enum Request {
     QueueRemove { name: String },
     /// Move a task that is not running to another queue.
     MoveTask { id: i64, queue: String },
+    /// Start this queued task before the others of its queue.
+    MoveToTop { id: i64 },
+    /// Give a task that is not running a new address for the same file (keeps what is already downloaded).
+    SetUrl { id: i64, url: String },
     GetSettings,
     SetSettings(Settings),
     GetAfterAll,
@@ -374,13 +416,18 @@ mod tests {
 
     #[test]
     fn settings_validation() {
-        let ok = Settings { connections: 8, speed_limit_kib: 0, proxy: None, download_root: "/tmp/x".into(), global_limit_kib: 0, category_dirs: Default::default(), auto_retries: 3, post_command: None };
+        let ok = Settings { connections: 8, speed_limit_kib: 0, proxy: None, download_root: "/tmp/x".into(), global_limit_kib: 0, category_dirs: Default::default(), auto_retries: 3, post_command: None, on_exists: "rename".into(), category_exts: Default::default() };
         assert!(ok.validate().is_ok());
         assert!(Settings { connections: 0, ..ok.clone() }.validate().is_err());
         assert!(Settings { connections: 33, ..ok.clone() }.validate().is_err());
         assert!(Settings { proxy: Some("ftp://p".into()), ..ok.clone() }.validate().is_err());
         assert!(Settings { proxy: Some("socks5://127.0.0.1:1080".into()), ..ok.clone() }.validate().is_ok());
         assert!(Settings { auto_retries: 21, ..ok.clone() }.validate().is_err());
+        assert!(Settings { on_exists: "ask".into(), ..ok.clone() }.validate().is_err());
+        assert!(Settings { on_exists: "overwrite".into(), ..ok.clone() }.validate().is_ok());
+        let mut exts = std::collections::BTreeMap::new();
+        exts.insert("Video".to_string(), vec!["mp4".to_string(), "my file".to_string()]);
+        assert!(Settings { category_exts: exts, ..ok.clone() }.validate().is_err());
         assert!(Settings { post_command: Some("  ".into()), ..ok.clone() }.validate().is_err());
         assert!(Settings { post_command: Some("clamscan \"$ZDM_FILE\"".into()), ..ok.clone() }.validate().is_ok());
         let mut dirs = std::collections::BTreeMap::new();
@@ -393,6 +440,7 @@ mod tests {
     fn old_settings_files_still_load_and_after_all_is_validated() {
         let s: Settings = serde_json::from_str(r#"{"connections":4,"speed_limit_kib":0,"proxy":null,"download_root":"/d"}"#).unwrap();
         assert_eq!((s.global_limit_kib, s.auto_retries, s.post_command), (0, 3, None));
+        assert_eq!(s.on_exists, "rename");
         assert!(AfterAll::Command { command: String::new() }.validate().is_err());
         assert!(AfterAll::Shutdown.validate().is_ok());
         let j = serde_json::to_string(&AfterAll::Command { command: "x".into() }).unwrap();

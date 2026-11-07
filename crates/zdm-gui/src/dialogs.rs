@@ -41,7 +41,14 @@ pub fn options_dialog(ui: &Rc<Ui>) {
     let g = adw::PreferencesGroup::builder().title("Downloads").description("Applies to downloads started from now on.").build();
     let root = adw::EntryRow::builder().title("Save downloads to (category folders are created inside)").text(&cur.download_root).build();
     let auto = adw::SwitchRow::builder().title("Show the progress window when a download starts").active(prefs0.auto_progress).build();
+    let exists_modes = ["rename", "overwrite", "skip"];
+    let exists = adw::ComboRow::builder()
+        .title("When a file with the same name already exists")
+        .model(&gtk::StringList::new(&["Add a number to the new name", "Replace the old file", "Skip the download"]))
+        .selected(exists_modes.iter().position(|m| *m == cur.on_exists).unwrap_or(0) as u32)
+        .build();
     g.add(&root);
+    g.add(&exists);
     g.add(&auto);
     page.add(&g);
     let gf = adw::PreferencesGroup::builder().title("Folder for each category").description("Leave empty to use a sub-folder of the folder above.").build();
@@ -54,6 +61,17 @@ pub fn options_dialog(ui: &Rc<Ui>) {
         })
         .collect();
     page.add(&gf);
+    let gt = adw::PreferencesGroup::builder().title("File types of each category").description("Which file extensions go to which category folder, separated by spaces. Anything else goes to Other.").build();
+    let type_rows: Vec<(String, adw::EntryRow)> = zdm_proto::CATEGORY_TABLE
+        .iter()
+        .map(|(c, defaults)| {
+            let shown = cur.category_exts.get(*c).map_or_else(|| defaults.join(" "), |v| v.join(" "));
+            let row = adw::EntryRow::builder().title(*c).text(shown).build();
+            gt.add(&row);
+            (c.to_string(), row)
+        })
+        .collect();
+    page.add(&gt);
     let gp = adw::PreferencesGroup::builder().title("After each download").description("A shell command, for example a virus scan: clamscan \"$ZDM_FILE\". The finished file is in $ZDM_FILE. If it fails, the download is kept and a note is added.").build();
     let post = adw::EntryRow::builder().title("Command (empty = none)").text(cur.post_command.clone().unwrap_or_default()).build();
     gp.add(&post);
@@ -124,7 +142,20 @@ pub fn options_dialog(ui: &Rc<Ui>) {
         let p = proxy.text().trim().to_string();
         let category_dirs = cat_rows.iter().filter_map(|(c, r)| Some((c.clone(), r.text().trim().to_string())).filter(|(_, d)| !d.is_empty())).collect();
         let command = post.text().trim().to_string();
+        // only keep a category's list when it differs from the built-in one
+        let mut category_exts = cur.category_exts.clone();
+        for (cat, row) in &type_rows {
+            let typed = helpers::parse_extensions(&row.text());
+            let default: Vec<String> = zdm_proto::CATEGORY_TABLE.iter().find(|(c, _)| c == cat).map(|(_, d)| d.iter().map(|e| e.to_string()).collect()).unwrap_or_default();
+            if typed.is_empty() || typed == default {
+                category_exts.remove(cat);
+            } else {
+                category_exts.insert(cat.clone(), typed);
+            }
+        }
         let s = Settings {
+            on_exists: exists_modes[(exists.selected() as usize).min(2)].to_string(),
+            category_exts,
             connections: conns.value() as u32,
             speed_limit_kib: limit.value() as u64,
             global_limit_kib: gl.value() as u64,
@@ -169,6 +200,7 @@ pub fn scheduler_dialog(ui: &Rc<Ui>) {
 
     let g2 = adw::PreferencesGroup::builder().title("Rules").build();
     let parallel = spin(1.0, 1.0, 16.0, 1.0, "Downloads running at the same time");
+    let qlimit = spin(0.0, 0.0, 10_000_000.0, 50.0, "Speed limit for this queue in KiB/s (0 = no limit)");
     let use_window = adw::SwitchRow::builder().title("Only download during a time window").build();
     let sh = spin(0.0, 0.0, 23.0, 1.0, "Start hour");
     let sm = spin(0.0, 0.0, 59.0, 5.0, "Start minute");
@@ -182,6 +214,7 @@ pub fn scheduler_dialog(ui: &Rc<Ui>) {
     }
     days_row.add_suffix(&day_box);
     g2.add(&parallel);
+    g2.add(&qlimit);
     g2.add(&use_window);
     for r in [sh.upcast_ref::<gtk::Widget>(), sm.upcast_ref(), eh.upcast_ref(), em.upcast_ref(), days_row.upcast_ref()] {
         use_window.bind_property("active", r, "sensitive").sync_create().build();
@@ -217,10 +250,11 @@ pub fn scheduler_dialog(ui: &Rc<Ui>) {
     let day_btns = Rc::new(day_btns);
     let fill = {
         let (infos, day_btns) = (infos.clone(), day_btns.clone());
-        let (combo, parallel, use_window, sh, sm, eh, em, del) = (combo.clone(), parallel.clone(), use_window.clone(), sh.clone(), sm.clone(), eh.clone(), em.clone(), del.clone());
+        let (combo, parallel, use_window, sh, sm, eh, em, del, qlimit) = (combo.clone(), parallel.clone(), use_window.clone(), sh.clone(), sm.clone(), eh.clone(), em.clone(), del.clone(), qlimit.clone());
         move || {
             let Some(q) = infos.get(combo.selected() as usize) else { return };
             parallel.set_value(q.max_parallel as f64);
+            qlimit.set_value(q.limit_kib as f64);
             use_window.set_active(q.window.is_some());
             let w = q.window.unwrap_or(Window { start_min: 0, end_min: 0, days: 0x7f });
             let ((a, b), (c, d)) = (helpers::hm(w.start_min), helpers::hm(w.end_min));
@@ -244,7 +278,7 @@ pub fn scheduler_dialog(ui: &Rc<Ui>) {
         let day_btns = day_btns.clone();
         save.connect_clicked(move |_| {
             let Some(q) = infos.get(combo.selected() as usize) else { return };
-            for r in [&parallel, &sh, &sm, &eh, &em] {
+            for r in [&parallel, &qlimit, &sh, &sm, &eh, &em] {
                 r.update();
             }
             let days = day_btns.iter().enumerate().filter(|(_, b)| b.is_active()).fold(0u8, |a, (i, _)| a | (1 << i));
@@ -257,7 +291,7 @@ pub fn scheduler_dialog(ui: &Rc<Ui>) {
             } else {
                 None
             };
-            send(&u, Request::QueueSet(QueueInfo { name: q.name.clone(), max_parallel: parallel.value() as u32, window }));
+            send(&u, Request::QueueSet(QueueInfo { name: q.name.clone(), max_parallel: parallel.value() as u32, window, limit_kib: qlimit.value() as u64 }));
             toast(&u, &format!("Queue “{}” saved ({}).", q.name, helpers::window_label(&window)));
             d.close();
         });
@@ -279,7 +313,7 @@ pub fn scheduler_dialog(ui: &Rc<Ui>) {
             if name.is_empty() {
                 return;
             }
-            send(&u, Request::QueueSet(QueueInfo { name: name.clone(), max_parallel: 1, window: None }));
+            send(&u, Request::QueueSet(QueueInfo { name: name.clone(), max_parallel: 1, window: None, limit_kib: 0 }));
             toast(&u, &format!("Queue “{name}” created. Open the scheduler again to set its rules."));
             d.close();
         });
@@ -446,4 +480,34 @@ pub fn after_all_choice(ui: &Rc<Ui>, kind: &str) {
         }
         _ => send(ui, Request::SetAfterAll(AfterAll::Nothing)),
     }
+}
+
+/// "Refresh link": a new address for a download that is stopped or failed (what is already there is kept).
+pub fn refresh_dialog(ui: &Rc<Ui>) {
+    let Some(p) = selected(ui).into_iter().next() else { return };
+    let Some(t) = crate::task_by_id(ui, p.id) else { return };
+    if matches!(t.state, State::Running | State::Completed) {
+        toast(ui, "Pause the download first (finished downloads cannot be refreshed).");
+        return;
+    }
+    let entry = gtk::Entry::builder().text(&t.url).width_chars(52).activates_default(true).build();
+    let dialog = adw::AlertDialog::builder()
+        .heading("Refresh link")
+        .body("Paste the new address of the same file, for example after the old link expired. What is already downloaded is kept when the server confirms it is the same file.")
+        .extra_child(&entry)
+        .build();
+    dialog.add_response("cancel", "Cancel");
+    dialog.add_response("ok", "Use this link");
+    dialog.set_response_appearance("ok", adw::ResponseAppearance::Suggested);
+    dialog.set_default_response(Some("ok"));
+    dialog.set_close_response("cancel");
+    let u = ui.clone();
+    dialog.connect_response(None, move |_, r| {
+        let url = entry.text().trim().to_string();
+        if r == "ok" && !url.is_empty() {
+            send(&u, Request::SetUrl { id: p.id, url });
+            toast(&u, "Link updated.");
+        }
+    });
+    dialog.present(Some(&ui.window));
 }

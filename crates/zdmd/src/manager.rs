@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 use zdm_core::{build_client, download_probed, Cancelled, Limiter, Options};
 use zdm_proto::{AddRequest, AfterAll, GrabLink, GrabRequest, QueueInfo, Settings, State, TaskInfo};
 
-use crate::categories::categorize;
+use crate::categories::categorize_with;
 use crate::config::Config;
 use crate::store::{NewTask, Store, DEFAULT_QUEUE};
 
@@ -48,6 +48,8 @@ fn load_settings(cfg: &Config) -> Settings {
         category_dirs: Default::default(),
         auto_retries: 3,
         post_command: None,
+        on_exists: "rename".into(),
+        category_exts: Default::default(),
     };
     std::fs::read(settings_path(cfg)).ok().and_then(|b| serde_json::from_slice::<Settings>(&b).ok()).filter(|s| s.validate().is_ok()).unwrap_or(defaults)
 }
@@ -100,7 +102,7 @@ const RETRY_PREFIX: &str = "Will retry (attempt";
 /// Network trouble that may go away (worth retrying) versus errors that will not fix themselves.
 pub fn is_transient(msg: &str) -> bool {
     let m = msg.to_ascii_lowercase();
-    const FINAL: [&str; 10] = ["only http", "bad proxy", "bad header", "bad credentials", "no such", "live stream", "unsupported", "could not decrypt", "not a web page", "is not a valid"];
+    const FINAL: [&str; 12] = ["needs ffmpeg", "already exists", "only http", "bad proxy", "bad header", "bad credentials", "no such", "live stream", "unsupported", "could not decrypt", "not a web page", "is not a valid"];
     if FINAL.iter().any(|k| m.contains(k)) {
         return false;
     }
@@ -139,6 +141,7 @@ struct AfterState {
 pub struct Manager {
     cfg: Config,
     global: Arc<Limiter>,
+    queue_limits: Mutex<HashMap<String, Arc<Limiter>>>,
     retries: Mutex<HashMap<i64, u32>>,
     retry_total: AtomicU64,
     after: Mutex<AfterState>,
@@ -160,7 +163,7 @@ impl Manager {
     pub fn with_store(cfg: Config, store: Store, clock: Clock) -> Arc<Self> {
         let settings = load_settings(&cfg);
         let global = Arc::new(Limiter::new(settings.global_limit_kib * 1024));
-        Arc::new(Self { cfg, global, retries: Mutex::default(), retry_total: AtomicU64::new(0), after: Mutex::default(), executor: Mutex::new(Arc::new(system_action)), settings: Mutex::new(settings), store: Mutex::new(store), running: Mutex::new(HashMap::new()), gen: AtomicU64::new(1), wake: Notify::new(), clock })
+        Arc::new(Self { cfg, global, queue_limits: Mutex::default(), retries: Mutex::default(), retry_total: AtomicU64::new(0), after: Mutex::default(), executor: Mutex::new(Arc::new(system_action)), settings: Mutex::new(settings), store: Mutex::new(store), running: Mutex::new(HashMap::new()), gen: AtomicU64::new(1), wake: Notify::new(), clock })
     }
 
     pub fn settings(&self) -> Settings {
@@ -185,11 +188,24 @@ impl Manager {
             same_host: g.same_host,
             extensions: g.extensions.iter().map(|e| e.trim_start_matches('.').to_ascii_lowercase()).filter(|e| !e.is_empty()).collect(),
             max_pages: if g.max_pages == 0 { 100 } else { (g.max_pages as usize).min(300) },
+            include: g.include.iter().map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect(),
+            exclude: g.exclude.iter().map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect(),
             ..Default::default()
         };
         let cancel = CancellationToken::new();
         let found = tokio::time::timeout(Duration::from_secs(120), zdm_core::grab::crawl(&client, &g.url, &go, &cancel)).await.map_err(|_| anyhow!("the site took too long to explore"))??;
         Ok(found.into_iter().map(|f| GrabLink { url: f.url, name: f.name, ext: f.ext, from: f.from }).collect())
+    }
+
+    /// The limiters that apply to a download of `queue`: the global one and, when set, the queue's own.
+    fn limiters_for(&self, queue: &str) -> Vec<Arc<Limiter>> {
+        let mut v = vec![self.global.clone()];
+        let kib = self.store().queue(queue).ok().flatten().map_or(0, |q| q.limit_kib);
+        let mut map = self.queue_limits.lock().unwrap();
+        let l = map.entry(queue.to_string()).or_insert_with(|| Arc::new(Limiter::new(0))).clone();
+        l.set_rate(kib * 1024);
+        v.push(l);
+        v
     }
 
     /// Total automatic retries scheduled so far (for tests and diagnostics).
@@ -246,6 +262,41 @@ impl Manager {
             }
             Some(_) => {}
         }
+    }
+
+    /// Start this queued task before the others of its queue.
+    pub fn move_to_top(&self, id: i64) -> Result<()> {
+        if self.get(id)?.state == State::Completed {
+            bail!("task {id} is already completed");
+        }
+        self.store().move_to_top(id)?;
+        self.wake.notify_one();
+        Ok(())
+    }
+
+    /// New address for a task that is not running. Progress is kept when the server's file is the same
+    /// (the engine compares size and validators); a failed task is queued again.
+    pub fn set_url(&self, id: i64, url: &str) -> Result<()> {
+        let info = self.get(id)?;
+        match info.state {
+            State::Running => bail!("pause task {id} before changing its address"),
+            State::Completed => bail!("task {id} is already completed"),
+            _ => {}
+        }
+        if !(url.starts_with("http://") || url.starts_with("https://") || zdm_core::ftp::is_ftp_url(url)) {
+            bail!("only http://, https:// and ftp:// addresses are supported");
+        }
+        let (clean, creds) = split_userinfo(url);
+        let mut headers = self.store().task(id)?.map(|t| t.headers).unwrap_or_default();
+        if let Some((u, p)) = creds {
+            headers.retain(|(k, _)| !k.eq_ignore_ascii_case(AUTH_HEADER));
+            headers.push((AUTH_HEADER.into(), format!("{}:{}", u.replace(':', "%3A"), p)));
+        }
+        self.store().set_url(id, &clean, &headers)?;
+        if info.state == State::Failed {
+            self.resume(id)?;
+        }
+        Ok(())
     }
 
     pub fn move_task(&self, id: i64, queue: &str) -> Result<()> {
@@ -377,6 +428,9 @@ impl Manager {
 
     pub fn queue_set(&self, q: &QueueInfo) -> Result<()> {
         self.store().set_queue(q)?;
+        if let Some(l) = self.queue_limits.lock().unwrap().get(&q.name) {
+            l.set_rate(q.limit_kib * 1024);
+        }
         self.wake.notify_one();
         Ok(())
     }
@@ -563,7 +617,7 @@ impl Manager {
             connections: set.connections as usize,
             limit_bps: if set.speed_limit_kib > 0 { Some(set.speed_limit_kib * 1024) } else { self.cfg.limit_bps },
             proxy: set.proxy.clone(),
-            shared_limit: Some(self.global.clone()),
+            shared_limits: self.limiters_for(&row.info.queue),
             referer: row.referer.clone(),
             headers,
             cancel: cancel.clone(),
@@ -575,6 +629,9 @@ impl Manager {
         let client = build_client(&opts)?;
         if zdm_core::ftp::is_ftp_url(&row.info.url) {
             return self.execute_ftp(id, &row, &opts).await;
+        }
+        if zdm_core::dash::is_dash_url(&row.info.url) {
+            return self.execute_dash(id, &row, &client, cancel).await;
         }
         if zdm_core::hls::is_hls_url(&row.info.url) {
             return self.execute_hls(id, &row, &client, cancel, set.connections as usize).await;
@@ -622,6 +679,43 @@ impl Manager {
         Ok(())
     }
 
+    /// A DASH video (`.mpd`), fetched and converted to MP4 by ffmpeg. No partial resume.
+    async fn execute_dash(self: &Arc<Self>, id: i64, row: &crate::store::TaskRow, client: &reqwest::Client, cancel: &CancellationToken) -> Result<()> {
+        let set = self.settings();
+        let dest = match &row.info.dest {
+            Some(d) => PathBuf::from(d),
+            None => {
+                let name = row.info.filename.clone().unwrap_or_else(|| format!("{}.mp4", hls_stem(&row.info.url)));
+                self.choose_dest(id, &name, row.dest_dir.as_deref(), None)?
+            }
+        };
+        let mut headers = row.headers.clone();
+        let userinfo = headers.iter().position(|(k, _)| k.eq_ignore_ascii_case(AUTH_HEADER)).map(|i| headers.remove(i).1);
+        let opts = Options {
+            auth: userinfo.and_then(|v| v.split_once(':').map(|(u, p)| (u.replace("%3A", ":"), p.to_string()))),
+            proxy: set.proxy.clone(),
+            referer: row.referer.clone(),
+            headers,
+            user_agent: row.user_agent.clone().unwrap_or_else(|| Options::default().user_agent),
+            cancel: cancel.clone(),
+            ..Options::default()
+        };
+        let this = self.clone();
+        zdm_core::dash::download_dash(client, &row.info.url, &dest, &opts, move |done, total| {
+            let s = this.store();
+            let _ = s.set_downloaded(id, done);
+            if total > 0 {
+                let _ = s.set_size(id, Some(total));
+            }
+        })
+        .await?;
+        let len = std::fs::metadata(&dest)?.len();
+        let s = self.store();
+        s.set_size(id, Some(len))?;
+        s.set_downloaded(id, len)?;
+        Ok(())
+    }
+
     /// A video stream (`.m3u8`): segments are fetched in parallel, joined, and remuxed to MP4 when ffmpeg exists.
     async fn execute_hls(self: &Arc<Self>, id: i64, row: &crate::store::TaskRow, client: &reqwest::Client, cancel: &CancellationToken, connections: usize) -> Result<()> {
         let dest = match &row.info.dest {
@@ -646,25 +740,31 @@ impl Manager {
         let len = std::fs::metadata(&done)?.len();
         let name = done.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let s = self.store();
-        s.set_meta(id, &name, &done.to_string_lossy(), categorize(&name), Some(len))?;
+        s.set_meta(id, &name, &done.to_string_lossy(), &categorize_with(&name, &self.settings().category_exts), Some(len))?;
         s.set_downloaded(id, len)?;
         Ok(())
     }
 
     /// Pick a unique destination path under the category folder and record it before downloading.
     fn choose_dest(&self, id: i64, filename: &str, dest_dir: Option<&str>, size: Option<u64>) -> Result<PathBuf> {
-        let category = categorize(filename);
-        let dir = dest_dir.map(PathBuf::from).unwrap_or_else(|| {
-            let set = self.settings();
-            set.category_dirs.get(category).map(PathBuf::from).unwrap_or_else(|| PathBuf::from(set.download_root).join(category))
-        });
+        let set = self.settings();
+        let category = categorize_with(filename, &set.category_exts);
+        let dir = dest_dir.map(PathBuf::from).unwrap_or_else(|| set.category_dirs.get(&category).map(PathBuf::from).unwrap_or_else(|| PathBuf::from(&set.download_root).join(&category)));
         std::fs::create_dir_all(&dir)?;
         let store = self.store();
         let claimed = store.claimed_dests()?;
-        let path = unique_path(&dir, filename, |p| claimed.iter().any(|c| Path::new(c) == p) || p.exists() || sibling(p, ".part").exists());
-        store.set_meta(id, filename, &path.to_string_lossy(), category, size)?;
+        let wanted = dir.join(filename);
+        let taken_by_task = |p: &Path| claimed.iter().any(|c| Path::new(c) == p);
+        let path = match set.on_exists.as_str() {
+            // replace an existing file, unless another download in the list is already going to that name
+            "overwrite" if !taken_by_task(&wanted) || !store.tasks()?.iter().any(|t| t.info.state != State::Completed && t.info.dest.as_deref().is_some_and(|d| Path::new(d) == wanted)) => wanted,
+            "skip" if wanted.exists() => bail!("{} already exists (skipped by your settings)", wanted.display()),
+            _ => unique_path(&dir, filename, |p| taken_by_task(p) || p.exists() || sibling(p, ".part").exists()),
+        };
+        store.set_meta(id, filename, &path.to_string_lossy(), &category, size)?;
         Ok(path)
     }
+
 }
 
 fn sibling(p: &Path, suffix: &str) -> PathBuf {

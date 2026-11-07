@@ -32,8 +32,8 @@ pub struct Options {
     pub auth: Option<(String, String)>,
     /// Total download rate cap in bytes per second, shared by all connections of this download.
     pub limit_bps: Option<u64>,
-    /// Rate cap shared with other downloads (the global limit). Applied together with `limit_bps`.
-    pub shared_limit: Option<Arc<Limiter>>,
+    /// Rate caps shared with other downloads (the global limit, a queue's limit). All apply, together with `limit_bps`.
+    pub shared_limits: Vec<Arc<Limiter>>,
     /// Name and password, and the Digest challenge learned from the server (shared by all connections).
     pub creds: Arc<crate::digest::Credentials>,
     /// Cancel the download; partial data and resume state are kept.
@@ -73,7 +73,7 @@ impl Default for Options {
             proxy: None,
             auth: None,
             limit_bps: None,
-            shared_limit: None,
+            shared_limits: Vec::new(),
             creds: Arc::default(),
             cancel: CancellationToken::new(),
         }
@@ -132,17 +132,17 @@ impl Limiter {
 #[derive(Clone, Default)]
 pub(crate) struct Ctx {
     own: Option<Arc<Limiter>>,
-    shared: Option<Arc<Limiter>>,
+    shared: Vec<Arc<Limiter>>,
     creds: Arc<crate::digest::Credentials>,
 }
 
 impl Ctx {
     pub(crate) fn from_opts(opts: &Options) -> Ctx {
-        Ctx { own: opts.limit_bps.map(|b| Arc::new(Limiter::new(b))), shared: opts.shared_limit.clone(), creds: opts.creds.clone() }
+        Ctx { own: opts.limit_bps.map(|b| Arc::new(Limiter::new(b))), shared: opts.shared_limits.clone(), creds: opts.creds.clone() }
     }
 
     pub(crate) async fn wait(&self, n: usize) {
-        let d = [&self.own, &self.shared].into_iter().flatten().map(|l| l.reserve(n)).max().unwrap_or_default();
+        let d = self.own.iter().chain(self.shared.iter()).map(|l| l.reserve(n)).max().unwrap_or_default();
         if !d.is_zero() {
             tokio::time::sleep(d).await;
         }
@@ -348,7 +348,9 @@ fn plan(size: u64, n: usize, min_split: u64) -> Vec<Seg> {
 fn load_sidecar(side: &Path, part: &Path, url: &str, p: &Probe, size: u64) -> Option<Vec<Seg>> {
     let sc: Sidecar = serde_json::from_slice(&std::fs::read(side).ok()?).ok()?;
     let part_len = std::fs::metadata(part).ok()?.len();
-    let ok = sc.url == url && sc.size == size && part_len == size && sc.etag == p.etag && sc.last_modified == p.last_modified
+    // A new address for the same file keeps its progress when the server vouches for it (size + validators).
+    let same_file = sc.url == url || sc.etag.is_some() || sc.last_modified.is_some();
+    let ok = same_file && sc.size == size && part_len == size && sc.etag == p.etag && sc.last_modified == p.last_modified
         && sc.segs.iter().all(|s| s.start <= s.pos && s.pos <= s.end && s.end <= size);
     ok.then_some(sc.segs)
 }

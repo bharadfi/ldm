@@ -133,7 +133,8 @@ test('media list is deduped and capped, names are readable, dash is flagged', ()
   assert.equal(mediaName('https://v.test/dir/My%20Clip.mp4?x=1'), 'My Clip.mp4');
   assert.equal(mediaName('https://v.test/'), 'v.test');
   assert.equal(mediaSupported('hls'), true);
-  assert.equal(mediaSupported('dash'), false);
+  assert.equal(mediaSupported('dash'), true, 'DASH goes through ffmpeg in the app');
+  assert.equal(mediaSupported('flash'), false);
 });
 
 test('link kinds, filtering and dedupe for "download all links"', () => {

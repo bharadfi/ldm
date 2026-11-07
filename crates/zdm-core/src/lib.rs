@@ -1,6 +1,7 @@
 //! zdm-core: segmented, resumable HTTP download engine.
 
 mod engine;
+pub mod dash;
 pub mod digest;
 pub mod ftp;
 pub mod grab;

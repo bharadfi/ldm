@@ -177,6 +177,7 @@ pub struct Ui {
     pub last_tip: RefCell<String>,
     pub grab: RefCell<Option<Rc<grabber::GrabWin>>>,
     pub after_all: RefCell<AfterAll>,
+    pub search_entry: gtk::SearchEntry,
     pub toolbar_box: gtk::Box,
     pub sidebar_scroll: gtk::ScrolledWindow,
     pub latest: RefCell<Vec<TaskInfo>>,
@@ -216,14 +217,16 @@ fn build_ui(app: &adw::Application) -> Rc<Ui> {
         String::static_type(),
     ]);
     let section = Rc::new(RefCell::new(Section::All));
+    let search: Rc<RefCell<String>> = Rc::default();
     let filter = gtk::TreeModelFilter::new(&store, None);
     {
-        let section = section.clone();
+        let (section, search) = (section.clone(), search.clone());
         filter.set_visible_func(move |m, it| {
             // A row can be visited before its values are set (None): show it, it is re-filtered on change.
             let text = |c: u32| m.get::<Option<String>>(it, c as i32).unwrap_or_default();
             let state = State::parse(&text(C_STATE)).unwrap_or(State::Queued);
-            section.borrow().matches(state, &text(C_CAT), &text(C_QUEUE))
+            let q = search.borrow();
+            section.borrow().matches(state, &text(C_CAT), &text(C_QUEUE)) && (q.is_empty() || text(C_NAME).to_lowercase().contains(q.as_str()) || text(C_URL).to_lowercase().contains(q.as_str()))
         });
     }
     let sorted = gtk::TreeModelSort::with_model(&filter);
@@ -331,6 +334,9 @@ fn build_ui(app: &adw::Application) -> Rc<Ui> {
     let b_qstop = make_btn("media-record-symbolic", "Stop Queue", "Pause every download of the selected queue", "tb-qstop");
     toolbar_box.append(&gtk::Separator::new(gtk::Orientation::Vertical));
     let b_folder = make_btn("folder-open-symbolic", "Open Folder", "Show the selected file in its folder", "tb-folder");
+    toolbar_box.append(&gtk::Box::builder().hexpand(true).build());
+    let search_entry = gtk::SearchEntry::builder().placeholder_text("Search downloads (Ctrl+F)").valign(gtk::Align::Center).width_chars(24).build();
+    toolbar_box.append(&search_entry);
 
     let tv = adw::ToolbarView::new();
     let top = gtk::Box::builder().orientation(gtk::Orientation::Vertical).build();
@@ -381,6 +387,7 @@ fn build_ui(app: &adw::Application) -> Rc<Ui> {
         last_tip: RefCell::default(),
         grab: RefCell::default(),
         after_all: RefCell::default(),
+        search_entry: search_entry.clone(),
         toolbar_box: toolbar_box.clone(),
         sidebar_scroll: sidebar_scroll.clone(),
         latest: RefCell::default(),
@@ -388,6 +395,15 @@ fn build_ui(app: &adw::Application) -> Rc<Ui> {
     });
     install_menu(&ui);
     install_inputs(&ui);
+    {
+        // typing in the search box narrows the table (name or link contains the text)
+        let u = ui.clone();
+        search_entry.connect_search_changed(move |e| {
+            *search.borrow_mut() = e.text().to_lowercase();
+            u.filter.refilter();
+            update_status(&u);
+        });
+    }
     menus::install(&ui, app, &menubar_slot);
     for (btn, action) in [(&b_grab, "win.grabber"), (&b_options, "win.options"), (&b_sched, "win.scheduler"), (&b_qstart, "win.queue-start"), (&b_qstop, "win.queue-stop")] {
         let w = window.clone();
@@ -837,6 +853,8 @@ fn install_menu(ui: &Rc<Ui>) {
     second.append(Some("Pause"), Some("win.pause"));
     second.append(Some("Resume"), Some("win.resume"));
     second.append(Some("Download again"), Some("win.again"));
+    second.append(Some("Move to top of queue"), Some("win.top"));
+    second.append(Some("Refresh link…"), Some("win.refresh"));
     let third = gio::Menu::new();
     third.append(Some("Copy link"), Some("win.copy"));
     third.append(Some("Properties"), Some("win.props"));
@@ -955,7 +973,7 @@ fn selftest(ui: &Rc<Ui>, base: String) {
         let b = base.clone();
         at(3, Box::new(move |u| {
             let _ = gtk::prelude::WidgetExt::activate_action(&u.window, "win.grabber", None);
-            send(u, Request::Grab(zdm_proto::GrabRequest { url: format!("{b}/site/"), depth: 1, same_host: true, extensions: vec!["bin".into()], max_pages: 0 }));
+            send(u, Request::Grab(zdm_proto::GrabRequest { url: format!("{b}/site/"), depth: 1, same_host: true, extensions: vec!["bin".into()], max_pages: 0, include: vec![], exclude: vec![] }));
         }));
         at(9, Box::new(|u| {
             let n = grabber::result_count(u);
@@ -965,6 +983,20 @@ fn selftest(ui: &Rc<Ui>, base: String) {
             }
         }));
     }
+    // the search box narrows the table to rows whose name or link contains the text
+    at(9, Box::new(|u| u.search_entry.set_text("vslow")));
+    at(10, Box::new(|u| {
+        let expected = u.latest.borrow().iter().filter(|t| t.url.contains("vslow")).count() as i32;
+        let (shown, total) = (u.filter.iter_n_children(None), u.store.iter_n_children(None));
+        eprintln!("SELFTEST search shows {shown} of {total} rows (expected {expected})");
+        // it must really narrow the table: some rows match, some do not
+        if shown != expected || expected == 0 || shown >= total {
+            std::process::exit(6);
+        }
+        u.search_entry.set_text("");
+        u.table.selection().select_all();
+        let _ = gtk::prelude::WidgetExt::activate_action(&u.window, "win.top", None);
+    }));
     // the armed "when downloads finish" action must round-trip through the daemon into the menu state
     at(5, Box::new(|u| send(u, Request::SetAfterAll(AfterAll::Command { command: "true".into() }))));
     at(8, Box::new(|u| {

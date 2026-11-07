@@ -1,6 +1,7 @@
 //! The small per-download window: percentage, speed, time left and one bar per connection.
 
 use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -14,6 +15,9 @@ use crate::segments::Layout;
 const PALETTE: [(f64, f64, f64); 8] =
     [(0.18, 0.66, 0.29), (0.08, 0.47, 0.84), (0.90, 0.54, 0.0), (0.56, 0.27, 0.68), (0.0, 0.62, 0.62), (0.84, 0.23, 0.16), (0.82, 0.60, 0.0), (0.85, 0.3, 0.6)];
 
+/// How many one-second samples the speed graph shows.
+const SAMPLES: usize = 60;
+
 pub struct ProgressWin {
     pub win: adw::Window,
     title: gtk::Label,
@@ -24,6 +28,8 @@ pub struct ProgressWin {
     area: gtk::DrawingArea,
     layout: Rc<RefCell<Option<Layout>>>,
     full: Rc<Cell<bool>>,
+    graph: gtk::DrawingArea,
+    history: Rc<RefCell<VecDeque<f64>>>,
     toggle: gtk::Button,
     close_when_done: gtk::CheckButton,
     state: Cell<State>,
@@ -76,6 +82,45 @@ impl ProgressWin {
                 }
             });
         }
+        // speed over the last minute, one sample per second
+        let history: Rc<RefCell<VecDeque<f64>>> = Rc::default();
+        let graph = gtk::DrawingArea::builder().content_height(64).hexpand(true).build();
+        {
+            let history = history.clone();
+            graph.set_draw_func(move |_, cr, w, h| {
+                let (w, h) = (w as f64, h as f64);
+                cr.set_source_rgb(0.93, 0.96, 0.99);
+                cr.rectangle(0.0, 0.0, w, h);
+                let _ = cr.fill();
+                let hist = history.borrow();
+                let peak = hist.iter().cloned().fold(1024.0, f64::max);
+                // grid: three faint lines
+                cr.set_source_rgba(0.55, 0.65, 0.8, 0.35);
+                cr.set_line_width(1.0);
+                for i in 1..4 {
+                    let y = h * i as f64 / 4.0;
+                    cr.move_to(0.0, y);
+                    cr.line_to(w, y);
+                    let _ = cr.stroke();
+                }
+                if hist.len() >= 2 {
+                    let step = w / (SAMPLES as f64 - 1.0);
+                    let x0 = w - step * (hist.len() as f64 - 1.0);
+                    cr.move_to(x0, h);
+                    for (i, v) in hist.iter().enumerate() {
+                        cr.line_to(x0 + step * i as f64, h - (v / peak) * (h - 4.0));
+                    }
+                    cr.line_to(w, h);
+                    cr.close_path();
+                    cr.set_source_rgba(0.18, 0.66, 0.29, 0.55);
+                    let _ = cr.fill_preserve();
+                    cr.set_source_rgb(0.12, 0.5, 0.2);
+                    cr.set_line_width(1.5);
+                    let _ = cr.stroke();
+                }
+            });
+        }
+        let graph_caption = gtk::Label::builder().label("Speed, last minute").xalign(0.0).css_classes(["dim-label", "caption"]).build();
         let area_caption = gtk::Label::builder().label("Progress by connection").xalign(0.0).css_classes(["dim-label", "caption"]).build();
 
         let toggle = gtk::Button::builder().label("Pause").build();
@@ -87,7 +132,7 @@ impl ProgressWin {
         buttons.append(&hide);
 
         let content = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(10).margin_top(14).margin_bottom(14).margin_start(18).margin_end(18).build();
-        for w in [title.upcast_ref::<gtk::Widget>(), url.upcast_ref(), status.upcast_ref(), bar.upcast_ref(), grid.upcast_ref(), area_caption.upcast_ref(), area.upcast_ref(), buttons.upcast_ref()] {
+        for w in [title.upcast_ref::<gtk::Widget>(), url.upcast_ref(), status.upcast_ref(), bar.upcast_ref(), grid.upcast_ref(), area_caption.upcast_ref(), area.upcast_ref(), graph_caption.upcast_ref(), graph.upcast_ref(), buttons.upcast_ref()] {
             content.append(w);
         }
         let header = adw::HeaderBar::new();
@@ -97,7 +142,7 @@ impl ProgressWin {
         tv.set_content(Some(&content));
         let win = adw::Window::builder().transient_for(parent).destroy_with_parent(true).title("Download progress").default_width(520).content(&tv).build();
 
-        let pw = Rc::new(ProgressWin { win, title, url, status, bar, values, area, layout, full, toggle, close_when_done, state: Cell::new(State::Queued) });
+        let pw = Rc::new(ProgressWin { win, title, url, status, bar, values, area, layout, full, graph, history, toggle, close_when_done, state: Cell::new(State::Queued) });
         {
             let pw2 = pw.clone();
             pw.toggle.connect_clicked(move |_| {
@@ -144,6 +189,14 @@ impl ProgressWin {
         self.full.set(t.state == State::Completed);
         *self.layout.borrow_mut() = layout;
         self.area.queue_draw();
+        {
+            let mut h = self.history.borrow_mut();
+            h.push_back(if t.state == State::Running { speed } else { 0.0 });
+            while h.len() > SAMPLES {
+                h.pop_front();
+            }
+        }
+        self.graph.queue_draw();
         self.toggle.set_label(if matches!(t.state, State::Running | State::Queued) { "Pause" } else { "Resume" });
         self.toggle.set_sensitive(t.state != State::Completed);
         t.state == State::Completed && self.close_when_done.is_active()

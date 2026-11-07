@@ -56,7 +56,17 @@ enum Cmd {
         /// Also follow links to other sites
         #[arg(long)]
         any_site: bool,
+        /// Only links matching this pattern (`*` = anything; repeatable)
+        #[arg(long)]
+        include: Vec<String>,
+        /// Skip links matching this pattern (repeatable)
+        #[arg(long)]
+        exclude: Vec<String>,
     },
+    /// Give a stopped or failed download a new address for the same file (keeps what was downloaded)
+    Refresh { id: i64, url: String },
+    /// Start a queued download before the others of its queue
+    Top { id: i64 },
     /// Show or change the daemon's settings (connections, limits, proxy, folders)
     Settings {
         #[command(subcommand)]
@@ -108,6 +118,8 @@ enum SettingsCmd {
     Folder { path: String },
     /// Shell command run after each download (file in $ZDM_FILE), or `none`
     PostCommand { command: String },
+    /// When the file name is taken: rename | overwrite | skip
+    OnExists { what: String },
 }
 
 #[derive(Subcommand)]
@@ -125,6 +137,9 @@ enum QueueCmd {
         /// Allowed days, comma separated: mon,tue,... (default: every day)
         #[arg(long)]
         days: Option<String>,
+        /// Speed limit shared by the queue's running downloads in KiB/s (0 = none)
+        #[arg(long, default_value_t = 0)]
+        limit_kib: u64,
     },
     Rm { name: String },
 }
@@ -288,12 +303,13 @@ async fn main() -> Result<()> {
                         let w = q.window.map_or("always".to_string(), |w| {
                             format!("{:02}:{:02}-{:02}:{:02} days={:07b}", w.start_min / 60, w.start_min % 60, w.end_min / 60, w.end_min % 60, w.days)
                         });
-                        println!("{:<16} parallel={}  {}", q.name, q.max_parallel, w);
+                        let limit = if q.limit_kib > 0 { format!("  limit={} KiB/s", q.limit_kib) } else { String::new() };
+                        println!("{:<16} parallel={}  {}{}", q.name, q.max_parallel, w, limit);
                     }
                 }
                 Ok(())
             }
-            QueueCmd::Set { name, parallel, window, days } => {
+            QueueCmd::Set { name, parallel, window, days, limit_kib } => {
                 let window = match window {
                     Some(w) => {
                         let (s, e) = w.split_once('-').ok_or_else(|| anyhow::anyhow!("window must be HH:MM-HH:MM"))?;
@@ -303,12 +319,14 @@ async fn main() -> Result<()> {
                     None if days.is_some() => bail!("--days needs --window"),
                     None => None,
                 };
-                call(&Request::QueueSet(QueueInfo { name, max_parallel: parallel, window })).await.map(drop)
+                call(&Request::QueueSet(QueueInfo { name, max_parallel: parallel, window, limit_kib })).await.map(drop)
             }
             QueueCmd::Rm { name } => call(&Request::QueueRemove { name }).await.map(drop),
         },
-        Cmd::Grab { url, depth, ext, any_site } => {
-            let req = GrabRequest { url, depth, same_host: !any_site, extensions: ext, max_pages: 0 };
+        Cmd::Refresh { id, url } => call(&Request::SetUrl { id, url }).await.map(drop),
+        Cmd::Top { id } => call(&Request::MoveToTop { id }).await.map(drop),
+        Cmd::Grab { url, depth, ext, any_site, include, exclude } => {
+            let req = GrabRequest { url, depth, same_host: !any_site, extensions: ext, max_pages: 0, include, exclude };
             if let Response::Links { links } = call(&Request::Grab(req)).await? {
                 for l in &links {
                     println!("{}", l.url);
@@ -329,6 +347,7 @@ async fn main() -> Result<()> {
                         SettingsCmd::Retries { n } => s.auto_retries = n,
                         SettingsCmd::Proxy { url } => s.proxy = (url != "none").then_some(url),
                         SettingsCmd::Folder { path } => s.download_root = path,
+                        SettingsCmd::OnExists { what } => s.on_exists = what,
                         SettingsCmd::PostCommand { command } => s.post_command = (!command.is_empty() && command != "none").then_some(command),
                     }
                     call(&Request::SetSettings(s)).await?;

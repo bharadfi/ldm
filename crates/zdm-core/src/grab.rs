@@ -21,11 +21,15 @@ pub struct GrabOptions {
     pub max_pages: usize,
     /// Stop collecting after this many files.
     pub max_links: usize,
+    /// Keep only files whose address matches one of these patterns (see [`matches_pattern`]); empty = all.
+    pub include: Vec<String>,
+    /// Drop files whose address matches one of these patterns.
+    pub exclude: Vec<String>,
 }
 
 impl Default for GrabOptions {
     fn default() -> Self {
-        GrabOptions { depth: 0, same_host: true, extensions: vec![], max_pages: 100, max_links: 5000 }
+        GrabOptions { depth: 0, same_host: true, extensions: vec![], max_pages: 100, max_links: 5000, include: vec![], exclude: vec![] }
     }
 }
 
@@ -189,13 +193,39 @@ pub fn extract(html: &str, base: &Url) -> Vec<Url> {
     out
 }
 
+/// Wildcard match, case-insensitive: `*` stands for anything. A pattern without `*` matches when the text
+/// contains it (so `thumb` finds `.../thumbnails/a.jpg`); with `*` the whole text must fit
+/// (`*/2024/*.pdf`, `https://cdn.*`).
+pub fn matches_pattern(pattern: &str, text: &str) -> bool {
+    let (p, t) = (pattern.to_ascii_lowercase(), text.to_ascii_lowercase());
+    if p.is_empty() {
+        return false;
+    }
+    if !p.contains('*') {
+        return t.contains(&p);
+    }
+    let parts: Vec<&str> = p.split('*').collect();
+    let (first, last) = (parts[0], parts[parts.len() - 1]);
+    if !t.starts_with(first) || t.len() < first.len() + last.len() || !t.ends_with(last) {
+        return false;
+    }
+    let mut at = first.len();
+    let end = t.len() - last.len();
+    for mid in &parts[1..parts.len() - 1] {
+        match t[at..end].find(mid) {
+            Some(i) => at += i + mid.len(),
+            None => return false,
+        }
+    }
+    true
+}
+
 fn wanted(u: &Url, opts: &GrabOptions) -> bool {
     let e = ext_of(u);
-    if opts.extensions.is_empty() {
-        !is_page(u)
-    } else {
-        opts.extensions.contains(&e)
-    }
+    let type_ok = if opts.extensions.is_empty() { !is_page(u) } else { opts.extensions.contains(&e) };
+    type_ok
+        && (opts.include.is_empty() || opts.include.iter().any(|p| matches_pattern(p, u.as_str())))
+        && !opts.exclude.iter().any(|p| matches_pattern(p, u.as_str()))
 }
 
 /// Crawl from `start`. Returns the files found (deduplicated, in discovery order).
@@ -303,6 +333,31 @@ mod tests {
         assert_eq!(names(d2), ["a.zip", "doc.pdf", "b.zip", "c.zip"]);
         assert!(!site.hits().iter().any(|p| p.contains("elsewhere")), "other hosts are not followed");
         assert_eq!(site.hits().iter().filter(|p| p.as_str() == "/sub/deep/p3.html").count(), 1, "only the depth-5 crawl reaches the third level");
+    }
+
+    #[test]
+    fn wildcard_patterns() {
+        assert!(matches_pattern("thumb", "http://h/img/Thumbnails/a.jpg"));
+        assert!(matches_pattern("*/2024/*.pdf", "http://h/docs/2024/report.pdf"));
+        assert!(!matches_pattern("*/2024/*.pdf", "http://h/docs/2023/report.pdf"));
+        assert!(!matches_pattern("*/2024/*.pdf", "http://h/docs/2024/report.pdf.bak"));
+        assert!(matches_pattern("https://cdn.*", "https://cdn.example.com/x.zip"));
+        assert!(!matches_pattern("https://cdn.*", "http://cdn.example.com/x.zip"));
+        assert!(!matches_pattern("a*b*c", "xxaxxbxxc") && matches_pattern("a*b*c", "aXbYc"));
+        assert!(!matches_pattern("", "anything"));
+    }
+
+    #[tokio::test]
+    async fn crawl_applies_include_and_exclude() {
+        let mut r = Routes::new();
+        r.insert("/".into(), page(&["a.zip", "thumbs/b.zip", "docs/c.pdf", "d-old.zip"]));
+        let site = serve_site(r).await;
+        let (client, cancel) = (Client::new(), CancellationToken::new());
+        let names = |v: Vec<Found>| v.into_iter().map(|f| f.name).collect::<Vec<_>>();
+        let o = GrabOptions { exclude: vec!["thumbs".into(), "*-old.*".into()], ..Default::default() };
+        assert_eq!(names(crawl(&client, &site.url("/"), &o, &cancel).await.unwrap()), ["a.zip", "c.pdf"]);
+        let o = GrabOptions { include: vec!["*.pdf".into()], ..Default::default() };
+        assert_eq!(names(crawl(&client, &site.url("/"), &o, &cancel).await.unwrap()), ["c.pdf"]);
     }
 
     #[tokio::test]

@@ -101,4 +101,9 @@ Engine features: shared adjustable `zdm_core::Limiter` (global limit), `digest.r
 server in `testserver::start_ftp`), daemon: duplicates, auto-retry (`is_transient`), `AfterAll` one-shot with injectable executor (`set_executor`, tests never
 power off), post-download command, per-category folders. Credentials live in the private task headers (`x-zdm-userinfo`), never in the visible URL.
 CLI: `zdm grab|settings|after`, `zdm add --user NAME:PASS --again`. Settings fields all have serde defaults so old settings.json files still load.
+Gap pass: `SetUrl` (refresh link; engine keeps a sidecar when size+validators match even if the address differs), `MoveToTop` (`sort_key` column), per-queue
+`limit_kib` (`Options.shared_limits` is a Vec: global + queue), `Settings.on_exists` (rename|overwrite|skip) and `category_exts`, crawler include/exclude
+(`grab::matches_pattern`), `dash.rs` (ffmpeg subprocess, kill on cancel), GUI search/speed graph/refresh dialog. Careful: `choose_dest` holds the store lock; never
+call anything that locks the store from inside it (a deadlock was found that way). `tests/dash.rs` is its own binary because manager.rs sets `ZDM_FFMPEG=none`.
+Never run `pkill -f`/`pgrep -f` with a pattern that also appears in your own command line (it kills the shell).
 

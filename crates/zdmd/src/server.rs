@@ -39,6 +39,14 @@ pub async fn dispatch(m: &Arc<Manager>, req: Request) -> Response {
                 Response::Ok
             }
             Request::Grab(g) => Response::Links { links: m.grab(g).await? },
+            Request::MoveToTop { id } => {
+                m.move_to_top(id)?;
+                Response::Ok
+            }
+            Request::SetUrl { id, url } => {
+                m.set_url(id, &url)?;
+                Response::Ok
+            }
             Request::GetAfterAll => Response::AfterAll(m.after_all()),
             Request::SetAfterAll(a) => {
                 m.set_after_all(a)?;

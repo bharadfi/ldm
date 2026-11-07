@@ -39,7 +39,7 @@ The popup shows whether the extension can reach the daemon. If the daemon is not
 - Right-click a link / video / audio / image → *Download with ZDM*.
 - **Video sniffer**: streams (`.m3u8`/HLS, MP4, WebM, audio) that a page loads are counted on the toolbar icon and listed in the
   popup with a *Download* button (HLS is downloaded segment by segment and converted to MP4 when ffmpeg is installed).
-  DASH (`.mpd`) is listed but not downloadable yet. The list starts over when the tab navigates to another address.
+  DASH (`.mpd`) is downloaded through ffmpeg (needs `ffmpeg` installed; no partial resume). The list starts over when the tab navigates to another address.
 - **Download links from this page…** (popup button or right-click on the page): lists every file link of the page, filter by type
   or text, tick, send to ZDM.
 - Popup settings: on/off, "keep small files in the browser" threshold, sites the browser should keep handling.
@@ -54,7 +54,7 @@ The popup shows whether the extension can reach the daemon. If the daemon is not
 
 ## Not implemented / not verified
 
-- DASH streams, and sniffing inside iframes served from other origins that the browser hides from extensions, are not handled.
+- Sniffing inside iframes served from other origins that the browser hides from extensions, are not handled.
 - Verified: extension logic (`cd extension && npm test` or `node --test test/`), the host protocol against a real
   daemon on Windows (including auto-start). The new video sniffer and links page are unit-tested for their logic only and **not yet verified in a real browser**; the earlier takeover was verified in Firefox and Brave. **Not verified in Chrome**, on Linux, or with Firefox's snap
   package (a snap-confined Firefox may be unable to launch the host; install Firefox from a `.deb`/Mozilla's apt repo

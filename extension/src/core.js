@@ -121,9 +121,9 @@ export function mediaName(url) {
   }
 }
 
-/** DASH manifests are listed but cannot be downloaded yet. */
+/** Every kind we list can be downloaded (DASH needs ffmpeg on the computer; the app says so if it is missing). */
 export function mediaSupported(kind) {
-  return kind !== 'dash';
+  return ['hls', 'dash', 'video', 'audio'].includes(kind);
 }
 
 // ---- "download all links" ---------------------------------------------------------------------------------

@@ -32,6 +32,8 @@ pub fn refresh_actions(ui: &Ui) {
     set("props", !picked.is_empty());
     set("delete", !picked.is_empty());
     set("move", any(&|p| p.state != State::Running));
+    set("top", any(&|p| p.state != State::Completed));
+    set("refresh", picked.len() == 1 && !matches!(picked[0].state, State::Running | State::Completed));
 }
 
 fn current_queue(ui: &Ui) -> String {
@@ -63,7 +65,7 @@ pub fn install(ui: &Rc<Ui>, app: &adw::Application, slot: &gtk::Box) {
     bar.append_submenu(Some("_File"), &file);
 
     let dl = gio::Menu::new();
-    dl.append_section(None, &section(&[("Resume", "win.resume"), ("Pause", "win.pause"), ("Pause all", "win.pause-all"), ("Download again", "win.again"), ("Move to queue…", "win.move")]));
+    dl.append_section(None, &section(&[("Resume", "win.resume"), ("Pause", "win.pause"), ("Pause all", "win.pause-all"), ("Download again", "win.again"), ("Move to queue…", "win.move"), ("Move to top of queue", "win.top"), ("Refresh link…", "win.refresh")]));
     dl.append_section(None, &section(&[("Start queue", "win.queue-start"), ("Stop queue", "win.queue-stop"), ("Scheduler…", "win.scheduler")]));
     let after = gio::Menu::new();
     for (label, kind) in [("Do nothing", "nothing"), ("Sleep", "sleep"), ("Shut down", "shutdown"), ("Run a command…", "command")] {
@@ -77,7 +79,7 @@ pub fn install(ui: &Rc<Ui>, app: &adw::Application, slot: &gtk::Box) {
     bar.append_submenu(Some("_Downloads"), &dl);
 
     let view = gio::Menu::new();
-    view.append_section(None, &section(&[("Category tree", "win.view-sidebar"), ("Toolbar", "win.view-toolbar")]));
+    view.append_section(None, &section(&[("Search downloads", "win.search"), ("Category tree", "win.view-sidebar"), ("Toolbar", "win.view-toolbar")]));
     bar.append_submenu(Some("_View"), &view);
 
     let help = gio::Menu::new();
@@ -107,6 +109,16 @@ pub fn install(ui: &Rc<Ui>, app: &adw::Application, slot: &gtk::Box) {
     }));
     mk("delete-done", Box::new(delete_completed_dialog));
     mk("move", Box::new(dialogs::move_dialog));
+    mk("refresh", Box::new(dialogs::refresh_dialog));
+    mk("top", Box::new(|u| {
+        // the last one moved ends up first, so go through them backwards to keep their order
+        for p in selected(u).iter().rev().filter(|p| p.state != State::Completed) {
+            send(u, Request::MoveToTop { id: p.id });
+        }
+    }));
+    mk("search", Box::new(|u| {
+        u.search_entry.grab_focus();
+    }));
     mk("select-all", Box::new(|u| u.table.selection().select_all()));
     mk("options", Box::new(dialogs::options_dialog));
     mk("scheduler", Box::new(dialogs::scheduler_dialog));
@@ -172,6 +184,7 @@ pub fn install(ui: &Rc<Ui>, app: &adw::Application, slot: &gtk::Box) {
         ("win.batch", &["<Ctrl><Shift>n"]),
         ("win.quit", &["<Ctrl>q"]),
         ("win.select-all", &["<Ctrl>a"]),
+        ("win.search", &["<Ctrl>f"]),
         ("win.options", &["<Ctrl>comma"]),
         ("win.delete", &["Delete"]),
         ("win.props", &["<Alt>Return"]),

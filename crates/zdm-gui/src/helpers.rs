@@ -17,6 +17,23 @@ pub fn parse_urls(text: &str) -> Vec<String> {
     out
 }
 
+/// Patterns typed in a text box: separated by spaces or commas.
+pub fn split_patterns(text: &str) -> Vec<String> {
+    text.split(|c: char| c.is_whitespace() || c == ',').map(str::trim).filter(|p| !p.is_empty()).map(str::to_string).collect()
+}
+
+/// File types typed in a text box (`pdf, .ZIP mp3`) -> lowercase extensions without dots, letters and digits only.
+pub fn parse_extensions(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    for p in split_patterns(text) {
+        let e = p.trim_start_matches('.').to_ascii_lowercase();
+        if !e.is_empty() && e.len() <= 12 && e.chars().all(|c| c.is_ascii_alphanumeric()) && !out.contains(&e) {
+            out.push(e);
+        }
+    }
+    out
+}
+
 pub const GRAB_PRESETS: [&str; 8] = ["All files", "Documents", "Images", "Video", "Music", "Compressed", "Programs", "Custom…"];
 
 /// Extensions for a preset of the site grabber (empty = every file-like link). `custom` is free text such as
@@ -131,6 +148,13 @@ mod tests {
         assert!(!looks_downloadable("https://example.com/blog/post.html"));
         assert!(!looks_downloadable("https://example.com/.zip"));
         assert_eq!(parse_urls("ftp://m.test/f.iso http://a.b/c"), vec!["ftp://m.test/f.iso", "http://a.b/c"]);
+    }
+
+    #[test]
+    fn typed_patterns_and_file_types() {
+        assert_eq!(split_patterns("  */2024/*  thumb,  *.tmp "), ["*/2024/*", "thumb", "*.tmp"]);
+        assert!(split_patterns("  , ").is_empty());
+        assert_eq!(parse_extensions(" .PDF, zip  mp3 zip bad-ext x/y"), ["pdf", "zip", "mp3"]);
     }
 
     #[test]

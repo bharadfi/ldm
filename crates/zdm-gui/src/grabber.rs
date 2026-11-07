@@ -38,8 +38,10 @@ pub fn open(ui: &Rc<Ui>) {
         let custom = custom.clone();
         move |c| custom.set_sensitive(c.selected() as usize == GRAB_PRESETS.len() - 1)
     });
+    let include = adw::EntryRow::builder().title("Only addresses matching (optional), for example */2024/* or .iso").build();
+    let exclude = adw::EntryRow::builder().title("Skip addresses matching (optional), for example thumb *-old.*").build();
     let group = adw::PreferencesGroup::new();
-    for r in [url.upcast_ref::<gtk::Widget>(), depth.upcast_ref(), same.upcast_ref(), types.upcast_ref(), custom.upcast_ref()] {
+    for r in [url.upcast_ref::<gtk::Widget>(), depth.upcast_ref(), same.upcast_ref(), types.upcast_ref(), custom.upcast_ref(), include.upcast_ref(), exclude.upcast_ref()] {
         group.add(r);
     }
 
@@ -130,7 +132,7 @@ pub fn open(ui: &Rc<Ui>) {
             status.set_text("Exploring… this can take a while for deep searches.");
             spinner.start();
             explore2.set_sensitive(false);
-            send(&u, Request::Grab(GrabRequest { url: address, depth: depth.value() as u32, same_host: same.is_active(), extensions: preset_extensions(types.selected() as usize, &custom.text()), max_pages: 0 }));
+            send(&u, Request::Grab(GrabRequest { url: address, depth: depth.value() as u32, same_host: same.is_active(), extensions: preset_extensions(types.selected() as usize, &custom.text()), max_pages: 0, include: crate::helpers::split_patterns(&include.text()), exclude: crate::helpers::split_patterns(&exclude.text()) }));
         });
     }
     {

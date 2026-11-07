@@ -174,7 +174,7 @@ async fn shared_limit_is_split_between_downloads_and_adjustable() {
     let srv = start(cfg(MIB / 2)).await;
     let dir = tempfile::tempdir().unwrap();
     let shared = Arc::new(Limiter::new(512 * 1024)); // 0.5 MiB/s for everything
-    let o = Options { shared_limit: Some(shared.clone()), ..opts() };
+    let o = Options { shared_limits: vec![shared.clone()], ..opts() };
     let t = Instant::now();
     let (a, b) = (dir.path().join("a.bin"), dir.path().join("b.bin"));
     let (ua, ub) = (srv.url("/a"), srv.url("/b"));
