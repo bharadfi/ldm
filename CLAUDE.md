@@ -1,5 +1,7 @@
 # zorin-dm (ZDM)
 
+**New session? Read `HANDOFF.md` first, then `docs/idm-analysis.md` and `docs/idm-behavior-spec.md`.**
+
 A segmented, resumable download manager for Zorin OS 18.x (Ubuntu 24.04 base) and later releases.
 Inspired by the *observable behavior* of a commercial Windows download manager. Clean-room: never copy its
 code, strings or data files; implement from public standards (RFC 9110 Range, RFC 8216 HLS, WebExtension and
