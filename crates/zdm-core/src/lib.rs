@@ -2,8 +2,9 @@
 
 mod engine;
 mod probe;
-#[cfg(test)]
-mod testserver;
+#[cfg(any(test, feature = "testserver"))]
+pub mod testserver;
 
-pub use engine::{download, download_probed, Options};
+pub use engine::{download, download_probed, Cancelled, Options};
+pub use tokio_util::sync::CancellationToken;
 pub use probe::{build_client, filename_from_disposition, probe, Probe};

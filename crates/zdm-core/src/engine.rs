@@ -10,6 +10,7 @@ use reqwest::header::{IF_RANGE, RANGE};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 
 use crate::probe::{build_client, probe, Probe};
 
@@ -30,6 +31,29 @@ pub struct Options {
     pub auth: Option<(String, String)>,
     /// Total download rate cap in bytes per second, shared by all connections.
     pub limit_bps: Option<u64>,
+    /// Cancel the download; partial data and resume state are kept.
+    pub cancel: CancellationToken,
+}
+
+/// Returned (inside `anyhow::Error`) when `Options::cancel` fired.
+#[derive(Debug)]
+pub struct Cancelled;
+
+impl std::fmt::Display for Cancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "download cancelled")
+    }
+}
+
+impl std::error::Error for Cancelled {}
+
+/// Aborts the wrapped task when dropped, so a dropped download never leaves a background saver running.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 impl Default for Options {
@@ -44,6 +68,7 @@ impl Default for Options {
             proxy: None,
             auth: None,
             limit_bps: None,
+            cancel: CancellationToken::new(),
         }
     }
 }
@@ -209,7 +234,7 @@ pub async fn download_probed(
                     }
                     _ => {
                         let cb = on_progress.clone();
-                        single(client, url, p2.size, &part, &lim, move |d, t| cb(d, t)).await
+                        single(client, url, p2.size, &part, &lim, &opts.cancel, move |d, t| cb(d, t)).await
                     }
                 };
             }
@@ -217,7 +242,7 @@ pub async fn download_probed(
         }
         _ => {
             let cb = on_progress.clone();
-            single(client, url, p.size, &part, &lim, move |d, t| cb(d, t)).await?
+            single(client, url, p.size, &part, &lim, &opts.cancel, move |d, t| cb(d, t)).await?
         }
     }
     std::fs::rename(&part, dest).with_context(|| format!("cannot move {} to {}", part.display(), dest.display()))?;
@@ -226,13 +251,29 @@ pub async fn download_probed(
 }
 
 /// Fallback when ranges are unavailable: one stream, restart from zero every time.
-async fn single(client: &Client, url: &str, size: Option<u64>, part: &Path, lim: &Lim, on_progress: impl Fn(u64, u64)) -> Result<()> {
-    let resp = client.get(url).send().await?.error_for_status()?;
+async fn single(
+    client: &Client,
+    url: &str,
+    size: Option<u64>,
+    part: &Path,
+    lim: &Lim,
+    cancel: &CancellationToken,
+    on_progress: impl Fn(u64, u64),
+) -> Result<()> {
+    let resp = tokio::select! {
+        _ = cancel.cancelled() => return Err(Cancelled.into()),
+        r = client.get(url).send() => r?.error_for_status()?,
+    };
     let file = File::create(part)?;
     let mut off = 0u64;
     let mut last = std::time::Instant::now();
     let mut stream = resp.bytes_stream();
-    while let Some(chunk) = stream.next().await {
+    loop {
+        let next = tokio::select! {
+            _ = cancel.cancelled() => return Err(Cancelled.into()),
+            c = stream.next() => c,
+        };
+        let Some(chunk) = next else { break };
         let chunk = chunk?;
         if let Some(l) = lim {
             l.wait(chunk.len()).await;
@@ -331,18 +372,30 @@ async fn ranged(
                 cb(done, size);
             }
         });
-        (handle, on_progress)
+        (AbortOnDrop(handle), on_progress)
     };
 
     let mut result = Ok(());
-    while let Some(r) = set.join_next().await {
-        if let Err(e) = r.map_err(|e| anyhow!(e)).and_then(|r| r) {
-            result = Err(e);
-            set.abort_all();
-            break;
+    loop {
+        tokio::select! {
+            _ = opts.cancel.cancelled() => {
+                set.abort_all();
+                result = Err(anyhow::Error::new(Cancelled));
+                break;
+            }
+            joined = set.join_next() => match joined {
+                None => break,
+                Some(r) => {
+                    if let Err(e) = r.map_err(|e| anyhow!(e)).and_then(|r| r) {
+                        result = Err(e);
+                        set.abort_all();
+                        break;
+                    }
+                }
+            },
         }
     }
-    ticker.0.abort();
+    drop(ticker.0);
     let done = shared.lock().unwrap().done_bytes();
     (ticker.1)(done, size);
     if result.is_err() {

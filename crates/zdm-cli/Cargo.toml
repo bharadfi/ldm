@@ -9,7 +9,9 @@ name = "zdm"
 path = "src/main.rs"
 
 [dependencies]
-zdm-core = { path = "../zdm-core" }
+zdm-core.workspace = true
+zdm-proto.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
+serde_json.workspace = true
 clap = { version = "4", features = ["derive", "env"] }

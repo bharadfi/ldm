@@ -12,6 +12,11 @@ futures-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 base64.workspace = true
+tokio-util.workspace = true
+
+[features]
+# Expose the in-process HTTP test server to other crates' tests.
+testserver = ["tokio/net", "tokio/io-util"]
 
 [dev-dependencies]
 tempfile.workspace = true

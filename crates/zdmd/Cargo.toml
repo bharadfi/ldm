@@ -1,0 +1,29 @@
+[package]
+name = "zdmd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "zdmd"
+path = "src/lib.rs"
+
+[[bin]]
+name = "zdmd"
+path = "src/main.rs"
+
+[dependencies]
+zdm-core.workspace = true
+zdm-proto.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true
+chrono.workspace = true
+dirs.workspace = true
+rand.workspace = true
+
+[dev-dependencies]
+zdm-core = { workspace = true, features = ["testserver"] }
+tempfile.workspace = true
