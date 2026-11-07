@@ -1,0 +1,16 @@
+[Unit]
+Description=ZDM download manager daemon
+Documentation=https://github.com/bharadfi/zorin-dm
+
+[Service]
+Type=simple
+# Installed by the .deb to /usr/bin; for a dev build use: systemctl --user edit zdmd (override ExecStart).
+ExecStart=%h/.cargo/bin/zdmd
+Restart=on-failure
+RestartSec=3
+# The daemon creates $XDG_RUNTIME_DIR/zdm/zdm.sock (0600) itself.
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=default.target

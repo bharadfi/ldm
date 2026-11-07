@@ -72,3 +72,8 @@ NOT verified: in a real browser, on Linux (the unix-only manifest-install test n
 Not built: HLS/video sniffing, "download all links", extension store packaging.
 Per-segment resume state is still the JSON sidecar next to each `.part` (the SQLite DB holds task-level state).
 Developed first on Windows (engine), continue on Zorin.
+Linux verification (Zorin session 1): `cargo test --workspace` (all pass, incl. the unix-only nmhost install test),
+`cargo clippy --workspace --all-targets` clean, node extension tests 10/10. Smoke-tested real `zdmd` + `zdm` against
+rangesrv.py: socket 0600, DB 0600, 8 ranged connections, pause/resume. Added `packaging/systemd/zdmd.service`
+(user unit, ExecStart `~/.cargo/bin/zdmd`; not yet enabled/tested via systemctl). This machine had no browser and no
+libgtk-4-dev/libadwaita-1-dev yet (needs sudo apt), so extension-in-browser and GUI are still pending.
