@@ -85,3 +85,10 @@ GtkTreeView table, status bar), polls `list` once a second, starts `zdmd` if mis
 TreeView on purpose (in-place row updates keep selection). Not yet: per-download progress window, context menu,
 scheduler/queue editor, tray, options, push updates. Verified by launching only; button behaviour judged by the owner.
 Product name is **Linux Download Manager** (owner's request); logo = `crates/zdm-gui/assets/logo-*.png` (owner-supplied image). App id `org.linuxdm.Manager`. Colourful light theme in `crates/zdm-gui/assets/style.css`. Feature roadmap: `docs/feature-checklist.md`.
+Daemon now has runtime settings (`Request::GetSettings/SetSettings`, saved to `<data dir>/settings.json`, 0600) and `MoveTask`.
+GUI: menu bar, Options, Scheduler, batch/import/export, About (`crates/zdm-gui/src/{menus,dialogs,helpers,prefs}.rs`).
+Headless GUI check: start `gtk4-broadwayd :5`, then run
+`G_DEBUG=fatal-criticals GDK_BACKEND=broadway BROADWAY_DISPLAY=:5 LDM_SELFTEST=http://127.0.0.1:8765 target/release/zdm-gui`
+(needs tools/rangesrv.py + zdmd running; exits 0 if add/delete/dialogs survive). It caught a real crash: never keep
+GtkListStore row handles across a `remove` (see `row_index`/`apply_tasks`); the debug build hid it, release crashed.
+

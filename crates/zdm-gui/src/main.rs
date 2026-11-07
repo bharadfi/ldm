@@ -7,7 +7,11 @@
 //! while rows are updated in place, which the newer ColumnView needs much more code for.
 #![allow(deprecated)]
 
+mod dialogs;
 mod fmt;
+mod helpers;
+mod menus;
+mod prefs;
 mod progress;
 mod segments;
 mod view;
@@ -22,7 +26,7 @@ use gtk::{gio, glib};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 use progress::ProgressWin;
 use view::Section;
-use zdm_proto::{AddRequest, Request, Response, State, TaskInfo};
+use zdm_proto::{AddRequest, QueueInfo, Request, Response, Settings, State, TaskInfo};
 
 const APP_ID: &str = "org.linuxdm.Manager";
 const APP_NAME: &str = "Linux Download Manager";
@@ -48,7 +52,8 @@ const C_DEST: u32 = 14;
 
 enum Event {
     Tasks(Vec<TaskInfo>),
-    Queues(Vec<String>),
+    Queues(Vec<QueueInfo>),
+    Settings(Settings),
     Offline(String),
     Failure(String),
 }
@@ -65,7 +70,12 @@ fn main() -> glib::ExitCode {
         }
         gtk::Window::set_default_icon_name(APP_ID);
     });
-    app.connect_activate(build_ui);
+    app.connect_activate(|app| {
+        let ui = build_ui(app);
+        if let Ok(base) = std::env::var("LDM_SELFTEST") {
+            selftest(&ui, base);
+        }
+    });
     app.run()
 }
 
@@ -89,7 +99,10 @@ fn worker(events: async_channel::Sender<Event>, mut cmds: tokio::sync::mpsc::Unb
                 Ok(Response::Tasks { tasks }) => {
                     let _ = events.send(Event::Tasks(tasks)).await;
                     if let Ok(Response::Queues { queues }) = zdm_proto::call(&Request::QueueList).await {
-                        let _ = events.send(Event::Queues(queues.into_iter().map(|q| q.name).collect())).await;
+                        let _ = events.send(Event::Queues(queues)).await;
+                    }
+                    if let Ok(Response::Settings(s)) = zdm_proto::call(&Request::GetSettings).await {
+                        let _ = events.send(Event::Settings(s)).await;
                     }
                 }
                 Ok(_) => {}
@@ -116,23 +129,29 @@ fn start_daemon() {
         .spawn();
 }
 
-struct Ui {
-    window: adw::ApplicationWindow,
-    store: gtk::ListStore,
-    table: gtk::TreeView,
-    sidebar_store: gtk::TreeStore,
-    sidebar: gtk::TreeView,
-    queues_parent: gtk::TreeIter,
-    filter: gtk::TreeModelFilter,
-    section: Rc<RefCell<Section>>,
-    banner: adw::Banner,
-    toasts: adw::ToastOverlay,
-    status: gtk::Label,
-    cmd_tx: UnboundedSender<Request>,
-    speeds: RefCell<HashMap<i64, (u64, Instant, f64)>>,
-    queue_names: RefCell<Vec<String>>,
-    latest: RefCell<Vec<TaskInfo>>,
-    progress: Rc<RefCell<HashMap<i64, Rc<ProgressWin>>>>,
+pub struct Ui {
+    pub window: adw::ApplicationWindow,
+    pub store: gtk::ListStore,
+    pub table: gtk::TreeView,
+    pub sidebar_store: gtk::TreeStore,
+    pub sidebar: gtk::TreeView,
+    pub queues_parent: gtk::TreeIter,
+    pub filter: gtk::TreeModelFilter,
+    pub section: Rc<RefCell<Section>>,
+    pub banner: adw::Banner,
+    pub toasts: adw::ToastOverlay,
+    pub status: gtk::Label,
+    pub cmd_tx: UnboundedSender<Request>,
+    pub speeds: RefCell<HashMap<i64, (u64, Instant, f64)>>,
+    pub queue_names: RefCell<Vec<String>>,
+    pub queue_infos: RefCell<Vec<QueueInfo>>,
+    pub settings: RefCell<Option<Settings>>,
+    pub prefs: RefCell<prefs::GuiPrefs>,
+    pub seen_first: std::cell::Cell<bool>,
+    pub toolbar_box: gtk::Box,
+    pub sidebar_scroll: gtk::ScrolledWindow,
+    pub latest: RefCell<Vec<TaskInfo>>,
+    pub progress: Rc<RefCell<HashMap<i64, Rc<ProgressWin>>>>,
 }
 
 #[derive(Clone)]
@@ -142,7 +161,7 @@ struct Picked {
     dest: Option<String>,
 }
 
-fn build_ui(app: &adw::Application) {
+fn build_ui(app: &adw::Application) -> Rc<Ui> {
     let (ev_tx, ev_rx) = async_channel::unbounded::<Event>();
     let (cmd_tx, cmd_rx) = unbounded_channel::<Request>();
     std::thread::spawn(move || worker(ev_tx, cmd_rx));
@@ -276,6 +295,11 @@ fn build_ui(app: &adw::Application) {
     let b_delete = make_btn("user-trash-symbolic", "Delete", "Remove the selected downloads", "tb-delete");
     let b_delete_done = make_btn("edit-clear-all-symbolic", "Delete Completed", "Remove all finished downloads from the list", "tb-done");
     toolbar_box.append(&gtk::Separator::new(gtk::Orientation::Vertical));
+    let b_options = make_btn("preferences-system-symbolic", "Options", "Connections, proxy, folders and browser helper", "tb-options");
+    let b_sched = make_btn("alarm-symbolic", "Scheduler", "Queues and time windows", "tb-sched");
+    let b_qstart = make_btn("media-seek-forward-symbolic", "Start Queue", "Resume every download of the selected queue", "tb-qstart");
+    let b_qstop = make_btn("media-record-symbolic", "Stop Queue", "Pause every download of the selected queue", "tb-qstop");
+    toolbar_box.append(&gtk::Separator::new(gtk::Orientation::Vertical));
     let b_folder = make_btn("folder-open-symbolic", "Open Folder", "Show the selected file in its folder", "tb-folder");
 
     let tv = adw::ToolbarView::new();
@@ -292,6 +316,8 @@ fn build_ui(app: &adw::Application) {
         header.set_title_widget(Some(&title));
     }
     top.append(&header);
+    let menubar_slot = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    top.append(&menubar_slot);
     top.append(&toolbar_box);
     top.append(&banner);
     tv.add_top_bar(&top);
@@ -315,10 +341,24 @@ fn build_ui(app: &adw::Application) {
         cmd_tx,
         speeds: RefCell::default(),
         queue_names: RefCell::default(),
+        queue_infos: RefCell::default(),
+        settings: RefCell::default(),
+        prefs: RefCell::new(prefs::load()),
+        seen_first: std::cell::Cell::new(false),
+        toolbar_box: toolbar_box.clone(),
+        sidebar_scroll: sidebar_scroll.clone(),
         latest: RefCell::default(),
         progress: Rc::default(),
     });
     install_menu(&ui);
+    menus::install(&ui, app, &menubar_slot);
+    for (btn, action) in [(&b_options, "win.options"), (&b_sched, "win.scheduler"), (&b_qstart, "win.queue-start"), (&b_qstop, "win.queue-stop")] {
+        let w = window.clone();
+        let action = action.to_string();
+        btn.connect_clicked(move |_| {
+            let _ = gtk::prelude::WidgetExt::activate_action(&w, &action, None);
+        });
+    }
     banner_hide(&ui);
 
     // sidebar selection -> filter
@@ -407,9 +447,24 @@ fn build_ui(app: &adw::Application) {
                 match ev {
                     Event::Tasks(tasks) => {
                         banner_hide(&ui);
-                        apply_tasks(&ui, &tasks);
+                        let fresh = apply_tasks(&ui, &tasks);
+                        menus::refresh_actions(&ui);
+                        let first = !ui.seen_first.replace(true);
+                        if !first && ui.prefs.borrow().auto_progress {
+                            let now = glib::real_time() / 1_000_000;
+                            for t in tasks.iter().filter(|t| fresh.contains(&t.id) && matches!(t.state, State::Running | State::Queued) && now - t.added_at < 30) {
+                                if ui.progress.borrow().len() < 3 {
+                                    show_progress(&ui, t.id);
+                                }
+                            }
+                        }
                     }
-                    Event::Queues(names) => apply_queues(&ui, names),
+                    Event::Queues(infos) => {
+                        let names: Vec<String> = infos.iter().map(|q| q.name.clone()).collect();
+                        *ui.queue_infos.borrow_mut() = infos;
+                        apply_queues(&ui, names);
+                    }
+                    Event::Settings(s) => *ui.settings.borrow_mut() = Some(s),
                     Event::Offline(msg) => {
                         ui.banner.set_title(&format!("Starting the download service… ({msg})"));
                         ui.banner.set_revealed(true);
@@ -420,6 +475,7 @@ fn build_ui(app: &adw::Application) {
         });
     }
     window.present();
+    ui
 }
 
 fn banner_hide(ui: &Ui) {
@@ -491,9 +547,7 @@ fn delete_dialog(ui: &Rc<Ui>) {
     let u = ui.clone();
     dialog.connect_response(None, move |_, id| {
         if id == "list" || id == "files" {
-            for p in &picked {
-                send(&u, Request::Remove { id: p.id, delete_files: id == "files" });
-            }
+            remove_picked(&u, &picked, id == "files");
         }
     });
     dialog.present(Some(&ui.window));
@@ -544,10 +598,11 @@ fn apply_queues(ui: &Ui, names: Vec<String>) {
     *ui.queue_names.borrow_mut() = names;
 }
 
-fn apply_tasks(ui: &Ui, tasks: &[TaskInfo]) {
-    let store = &ui.store;
+/// Map task id -> row of the backing store. Row handles are only valid until the store changes
+/// (removing rows invalidates them), so build this right before it is used.
+fn row_index(store: &gtk::ListStore) -> HashMap<i64, gtk::TreeIter> {
     let m = store.upcast_ref::<gtk::TreeModel>();
-    let mut index: HashMap<i64, gtk::TreeIter> = HashMap::new();
+    let mut index = HashMap::new();
     if let Some(it) = m.iter_first() {
         loop {
             index.insert(m.get::<i64>(&it, C_ID as i32), it);
@@ -556,12 +611,24 @@ fn apply_tasks(ui: &Ui, tasks: &[TaskInfo]) {
             }
         }
     }
+    index
+}
+
+fn apply_tasks(ui: &Ui, tasks: &[TaskInfo]) -> Vec<i64> {
+    let mut fresh: Vec<i64> = vec![];
+    let store = &ui.store;
     let present: HashSet<i64> = tasks.iter().map(|t| t.id).collect();
-    for (id, it) in &index {
-        if !present.contains(id) {
-            store.remove(it);
+    // Remove vanished rows one at a time, looking each row up again: a removal invalidates other handles.
+    loop {
+        let stale = row_index(store).into_iter().find(|(id, _)| !present.contains(id));
+        match stale {
+            Some((_, it)) => {
+                store.remove(&it);
+            }
+            None => break,
         }
     }
+    let index = row_index(store);
     ui.speeds.borrow_mut().retain(|id, _| present.contains(id));
 
     let now = Instant::now();
@@ -605,6 +672,7 @@ fn apply_tasks(ui: &Ui, tasks: &[TaskInfo]) {
             Some(it) => store.set(it, &cols),
             None => {
                 store.insert_with_values(None, &cols);
+                fresh.push(t.id);
             }
         }
     }
@@ -622,6 +690,7 @@ fn apply_tasks(ui: &Ui, tasks: &[TaskInfo]) {
         }
     }
     update_status(ui);
+    fresh
 }
 
 fn update_status(ui: &Ui) {
@@ -771,18 +840,7 @@ fn install_menu(ui: &Rc<Ui>) {
             sel.unselect_all();
             sel.select_path(&path);
         }
-        let picked = selected(&u);
-        let any = |f: &dyn Fn(&Picked) -> bool| picked.iter().any(f);
-        let set = |name: &str, on: bool| {
-            if let Some(a) = u.window.lookup_action(name).and_then(|a| a.downcast::<gio::SimpleAction>().ok()) {
-                a.set_enabled(on);
-            }
-        };
-        set("open", any(&|p| p.state == State::Completed && p.dest.is_some()));
-        set("folder", any(&|p| p.dest.is_some()));
-        set("show", any(&|p| p.state != State::Completed));
-        set("pause", any(&|p| matches!(p.state, State::Running | State::Queued)));
-        set("resume", any(&|p| matches!(p.state, State::Paused | State::Failed)));
+        menus::refresh_actions(&u);
         let pop = gtk::PopoverMenu::from_model(Some(&menu));
         pop.set_parent(table);
         pop.set_has_arrow(false);
@@ -794,4 +852,71 @@ fn install_menu(ui: &Rc<Ui>) {
         pop.popup();
     });
     ui.table.add_controller(click);
+}
+
+/// What the "Delete" dialog does after the user confirmed.
+fn remove_picked(ui: &Ui, picked: &[Picked], delete_files: bool) {
+    for p in picked {
+        send(ui, Request::Remove { id: p.id, delete_files });
+    }
+}
+
+/// `LDM_SELFTEST=<base url of tools/rangesrv.py>`: add and delete downloads the way the UI does, in several
+/// rounds, and exit 0 only if the window survived and the table ends up empty (headless verification).
+type UiOnce = Box<dyn FnOnce(&Rc<Ui>)>;
+
+fn selftest(ui: &Rc<Ui>, base: String) {
+    let at = |secs: u64, f: UiOnce| {
+        let u = ui.clone();
+        glib::timeout_add_local_once(Duration::from_secs(secs), move || f(&u));
+    };
+    let add = |base: String, n: usize| -> UiOnce {
+        Box::new(move |u| {
+            for i in 0..n {
+                let name = ["vslow.bin", "file.bin", "slow.bin"][i % 3];
+                send(u, Request::Add(AddRequest { url: format!("{base}/{name}"), start: true, ..Default::default() }));
+            }
+        })
+    };
+    at(2, add(base.clone(), 6));
+    for (i, name) in ["options", "scheduler", "batch", "about", "move"].iter().enumerate() {
+        let name = format!("win.{name}");
+        at(3 + i as u64 / 2, Box::new(move |u| {
+            if u.table.selection().count_selected_rows() == 0 {
+                u.table.selection().select_all();
+            }
+            let r = gtk::prelude::WidgetExt::activate_action(&u.window, &name, None);
+            eprintln!("SELFTEST opened {name}: {r:?}");
+        }));
+    }
+    at(4, Box::new(|u| {
+        // open a progress window for every download, as double-clicking would
+        let ids: Vec<i64> = u.latest.borrow().iter().map(|t| t.id).collect();
+        for id in ids {
+            show_progress(u, id);
+        }
+    }));
+    at(5, Box::new(|u| {
+        // delete the first three rows only
+        let sel = u.table.selection();
+        sel.unselect_all();
+        for i in 0..3 {
+            sel.select_path(&gtk::TreePath::from_indices(&[i]));
+        }
+        let picked = selected(u);
+        eprintln!("SELFTEST round 1 deleting {} rows", picked.len());
+        remove_picked(u, &picked, true);
+    }));
+    at(8, add(base, 4));
+    at(11, Box::new(|u| {
+        u.table.selection().select_all();
+        let picked = selected(u);
+        eprintln!("SELFTEST round 2 deleting {} rows", picked.len());
+        remove_picked(u, &picked, true);
+    }));
+    at(17, Box::new(|u| {
+        let left = u.store.iter_n_children(None);
+        eprintln!("SELFTEST rows left: {left}");
+        std::process::exit(if left == 0 { 0 } else { 3 });
+    }));
 }

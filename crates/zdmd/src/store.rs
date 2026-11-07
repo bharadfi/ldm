@@ -148,6 +148,11 @@ impl Store {
         Ok(())
     }
 
+    pub fn set_task_queue(&self, id: i64, queue: &str) -> Result<()> {
+        self.db.execute("UPDATE tasks SET queue=? WHERE id=?", params![queue, id])?;
+        Ok(())
+    }
+
     pub fn delete_task(&self, id: i64) -> Result<()> {
         self.db.execute("DELETE FROM tasks WHERE id=?", [id])?;
         Ok(())

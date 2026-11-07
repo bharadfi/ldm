@@ -15,8 +15,8 @@ observation only, our own icons/strings/code. `[x]` done, `[~]` partly, `[ ]` no
 
 ## Queues, scheduler, categories
 - [x] Named queues with max-parallel and weekly time windows (daemon), categories by extension with folders
-- [~] Sidebar shows categories/queues; [ ] editing queues & categories in the UI, move task between queues, reorder
-- [ ] Scheduler dialog (start/stop time, days, per-queue, "stop after N files", download limit)
+- [x] Sidebar categories/queues, edit queues, move task between queues (daemon `move_task`), Start/Stop Queue; [ ] editing categories, reorder within a queue
+- [x] Scheduler dialog (per-queue parallel limit, time window, days, create/delete queues); [ ] "stop after N files", per-queue speed limit
 - [ ] Completion actions per queue: hang up/exit/shutdown/sleep, run program, notify
 
 ## Window (main UI)
@@ -24,9 +24,10 @@ observation only, our own icons/strings/code. `[x]` done, `[~]` partly, `[ ]` no
 - [x] Colourful theme, logo, desktop launcher (`packaging/install-user.sh`)
 - [x] Per-download progress window (per-connection bars, rate, time left, Pause/Resume, close-when-finished); [ ] speed graph, auto-open on start
 - [x] Right-click menu (open, open folder, show progress, pause/resume, download again, copy link, properties, delete); [ ] refresh link, move to queue (needs a daemon request)
-- [~] Download properties dialog (read-only done); "Add URL" dialog with auth/referer/category/save-as fields, batch add
-- [ ] Options dialog (general, connection/proxy, save-to folders, file types, sounds, tray, language)
-- [ ] Tray icon + menu, minimise to tray, notifications on completion/error, keyboard shortcuts, search/filter box
+- [x] Properties dialog (read-only), batch add from text (clipboard prefill), import/export link list, About; [ ] "Add URL" fields for auth/referer/category/save-as
+- [~] Options dialog: save-to folder, connections (1-32), per-download speed limit, proxy, auto progress window, browser-helper installer; [ ] per-category folders, file types, sounds, language
+- [x] Menu bar (Tasks/File/Downloads/View/Help), shortcuts, toolbar with Options/Scheduler/Start-Stop Queue, view toggles
+- [ ] Tray icon + menu, minimise to tray, notifications on completion/error, search/filter box
 - [ ] Push updates from the daemon instead of polling
 
 ## Browser integration

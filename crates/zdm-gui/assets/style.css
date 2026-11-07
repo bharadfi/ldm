@@ -32,3 +32,11 @@ treeview.ldm-table progressbar progress { background: linear-gradient(to bottom,
 treeview.ldm-table progressbar trough { background: #e1ebf7; }
 
 .ldm-statusbar { background: linear-gradient(to bottom, #e3eefb, #c3d9f2); color: #17304f; border-top: 1px solid #8fb0d8; font-weight: 600; }
+
+.ldm-menubar { background: linear-gradient(to bottom, #f4f8fd, #dce9f8); border-bottom: 1px solid #b4c9e6; }
+.ldm-menubar > item { color: #17304f; padding: 3px 12px; font-weight: 600; }
+.ldm-menubar > item:hover { background: #bcd6f5; border-radius: 4px; }
+.tb-options image { color: #546e7a; }
+.tb-sched image   { color: #00897b; }
+.tb-qstart image  { color: #2e7d32; }
+.tb-qstop image   { color: #ef6c00; }

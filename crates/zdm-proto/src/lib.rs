@@ -119,6 +119,37 @@ pub struct TaskInfo {
     pub added_at: i64,
 }
 
+/// Daemon-wide settings, editable from the Options dialog and saved by the daemon.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct Settings {
+    /// Connections per download, 1..=32.
+    pub connections: u32,
+    /// Per-download speed limit in KiB/s; 0 = unlimited.
+    pub speed_limit_kib: u64,
+    /// Proxy URL (`http://`, `https://`, `socks5://`, `socks5h://`) for all downloads; none = use the environment.
+    pub proxy: Option<String>,
+    /// Parent of the per-category download folders (absolute path).
+    pub download_root: String,
+}
+
+impl Settings {
+    pub fn validate(&self) -> Result<(), String> {
+        if !(1..=32).contains(&self.connections) {
+            return Err("connections must be between 1 and 32".into());
+        }
+        if let Some(p) = &self.proxy {
+            let ok = ["http://", "https://", "socks5://", "socks5h://"].iter().any(|s| p.starts_with(s));
+            if !ok {
+                return Err("proxy must start with http://, https://, socks5:// or socks5h://".into());
+            }
+        }
+        if !std::path::Path::new(&self.download_root).is_absolute() {
+            return Err("download folder must be an absolute path".into());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Request {
@@ -133,6 +164,10 @@ pub enum Request {
     /// Create or update a queue.
     QueueSet(QueueInfo),
     QueueRemove { name: String },
+    /// Move a task that is not running to another queue.
+    MoveTask { id: i64, queue: String },
+    GetSettings,
+    SetSettings(Settings),
     Ping,
 }
 
@@ -144,6 +179,7 @@ pub enum Response {
     Task(TaskInfo),
     Tasks { tasks: Vec<TaskInfo> },
     Queues { queues: Vec<QueueInfo> },
+    Settings(Settings),
     Error { message: String },
 }
 
@@ -235,6 +271,17 @@ mod tests {
     fn window_all_day() {
         let w = Window { start_min: 0, end_min: 0, days: 0x7f };
         assert!(w.active_at(1234, 3));
+    }
+
+    #[test]
+    fn settings_validation() {
+        let ok = Settings { connections: 8, speed_limit_kib: 0, proxy: None, download_root: "/tmp/x".into() };
+        assert!(ok.validate().is_ok());
+        assert!(Settings { connections: 0, ..ok.clone() }.validate().is_err());
+        assert!(Settings { connections: 33, ..ok.clone() }.validate().is_err());
+        assert!(Settings { proxy: Some("ftp://p".into()), ..ok.clone() }.validate().is_err());
+        assert!(Settings { proxy: Some("socks5://127.0.0.1:1080".into()), ..ok.clone() }.validate().is_ok());
+        assert!(Settings { download_root: "relative".into(), ..ok }.validate().is_err());
     }
 
     #[test]

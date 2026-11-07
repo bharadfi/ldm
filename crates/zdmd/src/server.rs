@@ -34,6 +34,15 @@ pub async fn dispatch(m: &Arc<Manager>, req: Request) -> Response {
                 m.queue_set(&q)?;
                 Response::Ok
             }
+            Request::MoveTask { id, queue } => {
+                m.move_task(id, &queue)?;
+                Response::Ok
+            }
+            Request::GetSettings => Response::Settings(m.settings()),
+            Request::SetSettings(s) => {
+                m.set_settings(s)?;
+                Response::Ok
+            }
             Request::QueueRemove { name } => {
                 m.queue_remove(&name)?;
                 Response::Ok

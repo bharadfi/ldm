@@ -11,7 +11,7 @@ use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use zdm_core::{build_client, download_probed, probe, Cancelled, Options};
-use zdm_proto::{AddRequest, QueueInfo, State, TaskInfo};
+use zdm_proto::{AddRequest, QueueInfo, Settings, State, TaskInfo};
 
 use crate::categories::categorize;
 use crate::config::Config;
@@ -33,8 +33,39 @@ fn local_clock() -> (u32, u32) {
     (n.hour() * 60 + n.minute(), n.weekday().num_days_from_monday())
 }
 
+fn settings_path(cfg: &Config) -> PathBuf {
+    cfg.db_path.parent().map(Path::to_path_buf).unwrap_or_default().join("settings.json")
+}
+
+/// Saved settings if valid, else the defaults derived from the startup config.
+fn load_settings(cfg: &Config) -> Settings {
+    let defaults = Settings {
+        connections: cfg.connections as u32,
+        speed_limit_kib: cfg.limit_bps.map_or(0, |b| b / 1024),
+        proxy: None,
+        download_root: cfg.download_root.to_string_lossy().into_owned(),
+    };
+    std::fs::read(settings_path(cfg)).ok().and_then(|b| serde_json::from_slice::<Settings>(&b).ok()).filter(|s| s.validate().is_ok()).unwrap_or(defaults)
+}
+
+fn save_settings(path: &Path, s: &Settings) -> Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(s)?)?; // the proxy URL may carry a password
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+    }
+    std::fs::rename(tmp, path)?;
+    Ok(())
+}
+
 pub struct Manager {
     cfg: Config,
+    settings: Mutex<Settings>,
     store: Mutex<Store>,
     running: Mutex<HashMap<i64, Running>>,
     gen: AtomicU64,
@@ -49,7 +80,33 @@ impl Manager {
     }
 
     pub fn with_store(cfg: Config, store: Store, clock: Clock) -> Arc<Self> {
-        Arc::new(Self { cfg, store: Mutex::new(store), running: Mutex::new(HashMap::new()), gen: AtomicU64::new(1), wake: Notify::new(), clock })
+        let settings = load_settings(&cfg);
+        Arc::new(Self { cfg, settings: Mutex::new(settings), store: Mutex::new(store), running: Mutex::new(HashMap::new()), gen: AtomicU64::new(1), wake: Notify::new(), clock })
+    }
+
+    pub fn settings(&self) -> Settings {
+        self.settings.lock().unwrap().clone()
+    }
+
+    /// Validate, apply to downloads started from now on, and save next to the database.
+    pub fn set_settings(&self, s: Settings) -> Result<()> {
+        s.validate().map_err(|e| anyhow!(e))?;
+        save_settings(&settings_path(&self.cfg), &s)?;
+        *self.settings.lock().unwrap() = s;
+        Ok(())
+    }
+
+    pub fn move_task(&self, id: i64, queue: &str) -> Result<()> {
+        let st = self.get(id)?.state;
+        if st == State::Running {
+            bail!("pause task {id} before moving it to another queue");
+        }
+        if self.store().queue(queue)?.is_none() {
+            bail!("no such queue: {queue}");
+        }
+        self.store().set_task_queue(id, queue)?;
+        self.wake.notify_one();
+        Ok(())
     }
 
     fn store(&self) -> std::sync::MutexGuard<'_, Store> {
@@ -257,9 +314,11 @@ impl Manager {
 
     async fn execute(self: &Arc<Self>, id: i64, cancel: &CancellationToken) -> Result<()> {
         let row = self.store().task(id)?.ok_or_else(|| anyhow!("task {id} vanished"))?;
+        let set = self.settings();
         let mut opts = Options {
-            connections: self.cfg.connections,
-            limit_bps: self.cfg.limit_bps,
+            connections: set.connections as usize,
+            limit_bps: if set.speed_limit_kib > 0 { Some(set.speed_limit_kib * 1024) } else { self.cfg.limit_bps },
+            proxy: set.proxy.clone(),
             referer: row.referer.clone(),
             headers: row.headers.clone(),
             cancel: cancel.clone(),
@@ -290,7 +349,7 @@ impl Manager {
     /// Pick a unique destination path under the category folder and record it before downloading.
     fn choose_dest(&self, id: i64, filename: &str, dest_dir: Option<&str>, size: Option<u64>) -> Result<PathBuf> {
         let category = categorize(filename);
-        let dir = dest_dir.map(PathBuf::from).unwrap_or_else(|| self.cfg.download_root.join(category));
+        let dir = dest_dir.map(PathBuf::from).unwrap_or_else(|| PathBuf::from(self.settings().download_root).join(category));
         std::fs::create_dir_all(&dir)?;
         let store = self.store();
         let claimed = store.claimed_dests()?;

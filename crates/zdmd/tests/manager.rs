@@ -96,7 +96,8 @@ async fn completes_into_category_folder() {
     assert_eq!(tasks[0].category.as_deref(), Some("Video"));
     assert_eq!(tasks[0].downloaded, 3 * MIB);
     assert_eq!(std::fs::read(dest).unwrap(), expected(3 * MIB));
-    assert_eq!(t.state, State::Queued);
+    // the scheduler may already have started it by the time `add` returns
+    assert!(matches!(t.state, State::Queued | State::Running), "{:?}", t.state);
     assert_eq!(files_under(&env.dl()), vec!["movie.mp4"], "no .part/.zdm leftovers");
     env.stop().await;
 }
@@ -283,4 +284,38 @@ fn headers_and_queues_persist() {
     assert_eq!((t.headers, t.referer.as_deref(), t.info.state), (hdrs, Some("http://ref/"), State::Paused));
     let q = s.queue("Night").unwrap().unwrap();
     assert_eq!((q.max_parallel, q.window.unwrap().start_min), (2, 60));
+}
+
+#[tokio::test]
+async fn settings_apply_persist_and_reject_bad_values() {
+    let env = Env::new(None);
+    let mut s = env.m.settings();
+    assert_eq!(s.connections, 4);
+    s.connections = 2;
+    s.download_root = env.root.path().join("elsewhere").to_string_lossy().into_owned();
+    env.m.set_settings(s.clone()).unwrap();
+    assert_eq!(env.m.settings(), s);
+    assert!(env.m.set_settings(zdm_proto::Settings { connections: 99, ..s.clone() }).is_err());
+    assert_eq!(env.m.settings().connections, 2, "a rejected change must not apply");
+    // a second manager on the same data dir sees the saved file
+    let cfg = Config { db_path: env.root.path().join("unused.db"), download_root: env.dl(), connections: 4, limit_bps: None, tick: Duration::from_millis(50) };
+    let m2 = Manager::with_store(cfg, Store::open_in_memory().unwrap(), Arc::new(|| (0, 0)));
+    assert_eq!(m2.settings(), s);
+    // new downloads honour the new folder
+    let srv = testserver::start(server_cfg(MIB, "a.zip")).await;
+    env.add(srv.url("/a.zip"));
+    let tasks = env.until("completed", |t| t.iter().all(|x| x.state == State::Completed)).await;
+    assert!(tasks[0].dest.as_deref().unwrap().contains("elsewhere"), "{:?}", tasks[0].dest);
+    env.stop().await;
+}
+
+#[tokio::test]
+async fn move_task_between_queues() {
+    let env = Env::new(None);
+    env.m.queue_set(&QueueInfo { name: "Night".into(), max_parallel: 1, window: None }).unwrap();
+    let t = env.m.add(AddRequest { url: "http://127.0.0.1:1/x.bin".into(), start: false, ..Default::default() }).unwrap();
+    env.m.move_task(t.id, "Night").unwrap();
+    assert_eq!(env.m.get(t.id).unwrap().queue, "Night");
+    assert!(env.m.move_task(t.id, "Nope").is_err());
+    env.stop().await;
 }
