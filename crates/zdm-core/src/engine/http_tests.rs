@@ -1,6 +1,7 @@
 use std::time::Instant;
 
 use super::*;
+use crate::probe;
 use crate::testserver::{expected, start, Config};
 
 const MIB: u64 = 1 << 20;
@@ -165,4 +166,62 @@ async fn filename_comes_from_content_disposition() {
     let client = build_client(&opts()).unwrap();
     let p = probe(&client, &srv.url("/x")).await.unwrap();
     assert_eq!((p.filename.as_str(), p.size, p.ranges), ("a b.bin", Some(1000), true));
+}
+
+/// Two downloads that share one limiter together stay under its rate; changing the rate takes effect live.
+#[tokio::test(flavor = "multi_thread")]
+async fn shared_limit_is_split_between_downloads_and_adjustable() {
+    let srv = start(cfg(MIB / 2)).await;
+    let dir = tempfile::tempdir().unwrap();
+    let shared = Arc::new(Limiter::new(512 * 1024)); // 0.5 MiB/s for everything
+    let o = Options { shared_limit: Some(shared.clone()), ..opts() };
+    let t = Instant::now();
+    let (a, b) = (dir.path().join("a.bin"), dir.path().join("b.bin"));
+    let (ua, ub) = (srv.url("/a"), srv.url("/b"));
+    let (ra, rb) = tokio::join!(run(&ua, &a, &o), run(&ub, &b, &o));
+    ra.unwrap();
+    rb.unwrap();
+    let took = t.elapsed();
+    assert_file(&a, MIB / 2);
+    assert_file(&b, MIB / 2);
+    // 1 MiB in total at 0.5 MiB/s: about two seconds (a lone download would need one)
+    assert!(took >= Duration::from_millis(1500), "shared limit not applied: {took:?}");
+    assert!(took < Duration::from_secs(8), "far too slow: {took:?}");
+
+    shared.set_rate(0); // unlimited again, live
+    let t = Instant::now();
+    let c = dir.path().join("c.bin");
+    run(&srv.url("/c"), &c, &o).await.unwrap();
+    assert!(t.elapsed() < Duration::from_millis(1200), "limit removal ignored: {:?}", t.elapsed());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn digest_authentication_is_answered_and_wrong_password_fails() {
+    let size = 6 * MIB;
+    let srv = start(Config { digest: Some(("alice".into(), "s3cret".into())), ..cfg(size) }).await;
+    let dir = tempfile::tempdir().unwrap();
+
+    let dest = dir.path().join("d.bin");
+    let o = Options { creds: Arc::new(crate::Credentials::new("alice", "s3cret")), ..opts() };
+    run(&srv.url("/d.bin"), &dest, &o).await.unwrap();
+    assert_file(&dest, size);
+    assert!(srv.range_starts().len() >= 4, "every connection signed its own request: {:?}", srv.range_starts());
+
+    let bad = dir.path().join("bad.bin");
+    let o = Options { creds: Arc::new(crate::Credentials::new("alice", "wrong")), ..opts() };
+    let err = run(&srv.url("/bad.bin"), &bad, &o).await.unwrap_err();
+    assert!(format!("{err:#}").contains("401"), "{err:#}");
+
+    let none = dir.path().join("none.bin");
+    assert!(run(&srv.url("/none.bin"), &none, &opts()).await.is_err(), "no credentials, no download");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn digest_works_for_servers_without_range_support_too() {
+    let srv = start(Config { digest: Some(("bob".into(), "pw".into())), size: MIB, ranges: false, ..Config::default() }).await;
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("s.bin");
+    let o = Options { creds: Arc::new(crate::Credentials::new("bob", "pw")), ..opts() };
+    run(&srv.url("/s.bin"), &dest, &o).await.unwrap();
+    assert_file(&dest, MIB);
 }

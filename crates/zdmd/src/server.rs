@@ -39,6 +39,11 @@ pub async fn dispatch(m: &Arc<Manager>, req: Request) -> Response {
                 Response::Ok
             }
             Request::Grab(g) => Response::Links { links: m.grab(g).await? },
+            Request::GetAfterAll => Response::AfterAll(m.after_all()),
+            Request::SetAfterAll(a) => {
+                m.set_after_all(a)?;
+                Response::Ok
+            }
             Request::GetSettings => Response::Settings(m.settings()),
             Request::SetSettings(s) => {
                 m.set_settings(s)?;

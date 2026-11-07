@@ -4,7 +4,7 @@ use std::rc::Rc;
 
 use adw::prelude::*;
 use gtk::gio;
-use zdm_proto::Request;
+use zdm_proto::{AddRequest, AfterAll, Request};
 
 use crate::view::Section;
 use crate::{
@@ -65,6 +65,13 @@ pub fn install(ui: &Rc<Ui>, app: &adw::Application, slot: &gtk::Box) {
     let dl = gio::Menu::new();
     dl.append_section(None, &section(&[("Resume", "win.resume"), ("Pause", "win.pause"), ("Pause all", "win.pause-all"), ("Download again", "win.again"), ("Move to queue…", "win.move")]));
     dl.append_section(None, &section(&[("Start queue", "win.queue-start"), ("Stop queue", "win.queue-stop"), ("Scheduler…", "win.scheduler")]));
+    let after = gio::Menu::new();
+    for (label, kind) in [("Do nothing", "nothing"), ("Sleep", "sleep"), ("Shut down", "shutdown"), ("Run a command…", "command")] {
+        after.append(Some(label), Some(&format!("win.after-all::{kind}")));
+    }
+    let after_sec = gio::Menu::new();
+    after_sec.append_submenu(Some("When downloads finish"), &after);
+    dl.append_section(None, &after_sec);
     dl.append_section(None, &section(&[("Select all", "win.select-all"), ("Delete completed", "win.delete-done")]));
     dl.append_section(None, &section(&[("Options…", "win.options")]));
     bar.append_submenu(Some("_Downloads"), &dl);
@@ -121,6 +128,29 @@ pub fn install(ui: &Rc<Ui>, app: &adw::Application, slot: &gtk::Box) {
         u.toasts.add_toast(adw::Toast::new(&format!("Queue “{q}”: paused {} download(s)", ids.len())));
     }));
 
+    // "When downloads finish": radio items whose state mirrors what the daemon has armed
+    {
+        let a = gio::SimpleAction::new_stateful("after-all", Some(&String::static_variant_type()), &"nothing".to_variant());
+        let u = ui.clone();
+        a.connect_activate(move |_, p| {
+            if let Some(kind) = p.and_then(|p| p.get::<String>()) {
+                dialogs::after_all_choice(&u, &kind);
+            }
+        });
+        ui.window.add_action(&a);
+    }
+    // the toast offered for a copied link
+    {
+        let a = gio::SimpleAction::new("add-clipboard", Some(&String::static_variant_type()));
+        let u = ui.clone();
+        a.connect_activate(move |_, p| {
+            if let Some(url) = p.and_then(|p| p.get::<String>()) {
+                send(&u, Request::Add(AddRequest { url, start: true, ..Default::default() }));
+            }
+        });
+        ui.window.add_action(&a);
+    }
+
     // View toggles (checkable menu items)
     for (name, which) in [("view-sidebar", 0), ("view-toolbar", 1)] {
         let a = gio::SimpleAction::new_stateful(name, None, &true.to_variant());
@@ -156,4 +186,19 @@ pub fn install(ui: &Rc<Ui>, app: &adw::Application, slot: &gtk::Box) {
     let u = ui.clone();
     ui.table.selection().connect_changed(move |_| refresh_actions(&u));
     refresh_actions(ui);
+}
+
+/// Show what the daemon has armed in the "When downloads finish" menu and the status bar.
+pub fn sync_after_all(ui: &Ui, a: &AfterAll) {
+    *ui.after_all.borrow_mut() = a.clone();
+    let kind = match a {
+        AfterAll::Nothing => "nothing",
+        AfterAll::Sleep => "sleep",
+        AfterAll::Shutdown => "shutdown",
+        AfterAll::Command { .. } => "command",
+    };
+    if let Some(act) = ui.window.lookup_action("after-all").and_then(|x| x.downcast::<gio::SimpleAction>().ok()) {
+        act.set_state(&kind.to_variant());
+    }
+    crate::update_status(ui);
 }

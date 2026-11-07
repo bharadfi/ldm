@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use zdm_core::{build_client, download_probed, probe, Options};
-use zdm_proto::{call, AddRequest, QueueInfo, Request, Response, TaskInfo, Window};
+use zdm_proto::{call, AddRequest, AfterAll, GrabRequest, QueueInfo, Request, Response, TaskInfo, Window};
 
 /// Segmented, resumable downloader.
 #[derive(Parser)]
@@ -37,6 +37,38 @@ enum Cmd {
         /// Add paused instead of starting
         #[arg(long)]
         paused: bool,
+        /// Sign-in for sites that ask, as NAME:PASSWORD (Basic or Digest; ftp:// too)
+        #[arg(long)]
+        user: Option<String>,
+        /// Add it even if the same link is already in the list
+        #[arg(long)]
+        again: bool,
+    },
+    /// Look for downloadable files on a web page
+    Grab {
+        url: String,
+        /// Also follow links to other pages this many levels deep
+        #[arg(long, default_value_t = 0)]
+        depth: u32,
+        /// File extensions to look for, comma separated (default: every file link)
+        #[arg(long, value_delimiter = ',')]
+        ext: Vec<String>,
+        /// Also follow links to other sites
+        #[arg(long)]
+        any_site: bool,
+    },
+    /// Show or change the daemon's settings (connections, limits, proxy, folders)
+    Settings {
+        #[command(subcommand)]
+        cmd: Option<SettingsCmd>,
+    },
+    /// What to do once all downloads are finished: nothing, sleep, shutdown, or run a command
+    After {
+        /// nothing | sleep | shutdown | command
+        what: String,
+        /// The command, for `command`
+        #[arg(trailing_var_arg = true)]
+        command: Vec<String>,
     },
     /// List downloads
     List,
@@ -58,6 +90,24 @@ enum Cmd {
     },
     /// Check that the daemon is running
     Ping,
+}
+
+#[derive(Subcommand)]
+enum SettingsCmd {
+    /// Connections per download (1-32)
+    Connections { n: u32 },
+    /// Speed limit per download in KiB/s (0 = none)
+    Limit { kib: u64 },
+    /// Speed limit for all downloads together in KiB/s (0 = none)
+    GlobalLimit { kib: u64 },
+    /// Automatic retries after network errors (0-20)
+    Retries { n: u32 },
+    /// Proxy address, or `none`
+    Proxy { url: String },
+    /// Parent folder of the category folders (absolute path)
+    Folder { path: String },
+    /// Shell command run after each download (file in $ZDM_FILE), or `none`
+    PostCommand { command: String },
 }
 
 #[derive(Subcommand)]
@@ -204,8 +254,9 @@ async fn get(a: GetArgs) -> Result<()> {
 async fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Get(a) => get(a).await,
-        Cmd::Add { url, filename, dest_dir, queue, referer, user_agent, headers, paused } => {
-            let req = AddRequest { url, filename, dest_dir, queue, referer, user_agent, headers: parse_headers(&headers)?, start: !paused };
+        Cmd::Add { url, filename, dest_dir, queue, referer, user_agent, headers, paused, user, again } => {
+            let auth = user.map(|u| u.split_once(':').map_or((u.clone(), String::new()), |(a, b)| (a.to_string(), b.to_string())));
+            let req = AddRequest { url, filename, dest_dir, queue, referer, user_agent, headers: parse_headers(&headers)?, start: !paused, allow_duplicate: again, auth };
             let r = call(&Request::Add(req)).await?;
             if let Response::Task(t) = r {
                 print_task(&t);
@@ -256,6 +307,46 @@ async fn main() -> Result<()> {
             }
             QueueCmd::Rm { name } => call(&Request::QueueRemove { name }).await.map(drop),
         },
+        Cmd::Grab { url, depth, ext, any_site } => {
+            let req = GrabRequest { url, depth, same_host: !any_site, extensions: ext, max_pages: 0 };
+            if let Response::Links { links } = call(&Request::Grab(req)).await? {
+                for l in &links {
+                    println!("{}", l.url);
+                }
+                eprintln!("{} file link(s)", links.len());
+            }
+            Ok(())
+        }
+        Cmd::Settings { cmd } => {
+            let Response::Settings(mut s) = call(&Request::GetSettings).await? else { bail!("unexpected answer") };
+            match cmd {
+                None => println!("{}", serde_json::to_string_pretty(&s)?),
+                Some(c) => {
+                    match c {
+                        SettingsCmd::Connections { n } => s.connections = n,
+                        SettingsCmd::Limit { kib } => s.speed_limit_kib = kib,
+                        SettingsCmd::GlobalLimit { kib } => s.global_limit_kib = kib,
+                        SettingsCmd::Retries { n } => s.auto_retries = n,
+                        SettingsCmd::Proxy { url } => s.proxy = (url != "none").then_some(url),
+                        SettingsCmd::Folder { path } => s.download_root = path,
+                        SettingsCmd::PostCommand { command } => s.post_command = (!command.is_empty() && command != "none").then_some(command),
+                    }
+                    call(&Request::SetSettings(s)).await?;
+                    println!("saved");
+                }
+            }
+            Ok(())
+        }
+        Cmd::After { what, command } => {
+            let a = match what.as_str() {
+                "nothing" => AfterAll::Nothing,
+                "sleep" => AfterAll::Sleep,
+                "shutdown" => AfterAll::Shutdown,
+                "command" => AfterAll::Command { command: command.join(" ") },
+                other => bail!("unknown action {other}: use nothing, sleep, shutdown or command"),
+            };
+            call(&Request::SetAfterAll(a)).await.map(drop)
+        }
         Cmd::Ping => {
             if let Response::Pong { version } = call(&Request::Ping).await? {
                 println!("zdmd {version} is running");

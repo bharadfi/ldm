@@ -4,7 +4,7 @@ use std::rc::Rc;
 
 use adw::prelude::*;
 use gtk::{gio, glib};
-use zdm_proto::{AddRequest, QueueInfo, Request, Settings, Window};
+use zdm_proto::{AddRequest, AfterAll, QueueInfo, Request, Settings, Window};
 
 use crate::helpers::{self, parse_urls};
 use crate::prefs::{self, GuiPrefs};
@@ -44,14 +44,30 @@ pub fn options_dialog(ui: &Rc<Ui>) {
     g.add(&root);
     g.add(&auto);
     page.add(&g);
+    let gf = adw::PreferencesGroup::builder().title("Folder for each category").description("Leave empty to use a sub-folder of the folder above.").build();
+    let cat_rows: Vec<(String, adw::EntryRow)> = crate::view::CATEGORIES
+        .iter()
+        .map(|c| {
+            let row = adw::EntryRow::builder().title(*c).text(cur.category_dirs.get(*c).cloned().unwrap_or_default()).build();
+            gf.add(&row);
+            (c.to_string(), row)
+        })
+        .collect();
+    page.add(&gf);
+    let gp = adw::PreferencesGroup::builder().title("After each download").description("A shell command, for example a virus scan: clamscan \"$ZDM_FILE\". The finished file is in $ZDM_FILE. If it fails, the download is kept and a note is added.").build();
+    let post = adw::EntryRow::builder().title("Command (empty = none)").text(cur.post_command.clone().unwrap_or_default()).build();
+    gp.add(&post);
+    page.add(&gp);
     let gi = adw::PreferencesGroup::builder().title("Interface").build();
     let tray_note = if ui.tray.borrow().is_some() { "" } else { "No tray was found on this desktop, so closing the window will quit the app." };
     let to_tray = adw::SwitchRow::builder().title("Closing the window keeps the app running in the tray").subtitle(tray_note).active(prefs0.close_to_tray).build();
     let notes = adw::SwitchRow::builder().title("Show a notification when a download finishes or fails").active(prefs0.notifications).build();
     let autostart0 = prefs::autostart_enabled();
     let autostart = adw::SwitchRow::builder().title("Start with the computer (hidden in the tray)").active(autostart0).build();
+    let clip = adw::SwitchRow::builder().title("Offer to download links I copy").subtitle("Shows a button when you copy a link to a file, a video stream or an FTP site while this window is open.").active(prefs0.monitor_clipboard).build();
     gi.add(&to_tray);
     gi.add(&notes);
+    gi.add(&clip);
     gi.add(&autostart);
     page.add(&gi);
     dialog.add(&page);
@@ -63,11 +79,17 @@ pub fn options_dialog(ui: &Rc<Ui>) {
     let limit = spin(cur.speed_limit_kib as f64, 0.0, 10_000_000.0, 50.0, "Speed limit per download in KiB/s (0 = no limit)");
     g.add(&conns);
     g.add(&limit);
+    let gl = spin(cur.global_limit_kib as f64, 0.0, 10_000_000.0, 50.0, "Speed limit for all downloads together in KiB/s (0 = no limit)");
+    g.add(&gl);
     let g2 = adw::PreferencesGroup::builder().title("Proxy").build();
     let proxy = adw::EntryRow::builder().title("Proxy address, for example socks5://127.0.0.1:1080 (empty = system settings)").text(cur.proxy.clone().unwrap_or_default()).build();
     g2.add(&proxy);
     page.add(&g);
+    let g3 = adw::PreferencesGroup::builder().title("Reliability").description("A download that fails because of a network problem is tried again by itself after a growing pause.").build();
+    let retries = spin(cur.auto_retries as f64, 0.0, 20.0, 1.0, "Automatic retries");
+    g3.add(&retries);
     page.add(&g2);
+    page.add(&g3);
     dialog.add(&page);
 
     // Browser
@@ -97,13 +119,26 @@ pub fn options_dialog(ui: &Rc<Ui>) {
     dialog.connect_closed(move |_| {
         conns.update();
         limit.update();
+        gl.update();
+        retries.update();
         let p = proxy.text().trim().to_string();
-        let s = Settings { connections: conns.value() as u32, speed_limit_kib: limit.value() as u64, proxy: (!p.is_empty()).then_some(p), download_root: root.text().trim().to_string() };
+        let category_dirs = cat_rows.iter().filter_map(|(c, r)| Some((c.clone(), r.text().trim().to_string())).filter(|(_, d)| !d.is_empty())).collect();
+        let command = post.text().trim().to_string();
+        let s = Settings {
+            connections: conns.value() as u32,
+            speed_limit_kib: limit.value() as u64,
+            global_limit_kib: gl.value() as u64,
+            auto_retries: retries.value() as u32,
+            proxy: (!p.is_empty()).then_some(p),
+            download_root: root.text().trim().to_string(),
+            category_dirs,
+            post_command: (!command.is_empty()).then_some(command),
+        };
         if s != cur {
             send(&u, Request::SetSettings(s));
             toast(&u, "Options saved. They apply to downloads started from now on.");
         }
-        let gp = GuiPrefs { auto_progress: auto.is_active(), close_to_tray: to_tray.is_active(), notifications: notes.is_active() };
+        let gp = GuiPrefs { auto_progress: auto.is_active(), close_to_tray: to_tray.is_active(), notifications: notes.is_active(), monitor_clipboard: clip.is_active() };
         if autostart.is_active() != autostart0 {
             if let Err(e) = prefs::set_autostart(autostart.is_active()) {
                 toast(&u, &format!("Could not change the autostart entry: {e}"));
@@ -364,4 +399,51 @@ pub fn about_dialog(ui: &Rc<Ui>) {
         .license("MIT OR Apache-2.0")
         .build();
     d.present(Some(&ui.window));
+}
+
+/// "When downloads finish": pick what happens once everything is done (asks first for shutdown and sleep).
+pub fn after_all_choice(ui: &Rc<Ui>, kind: &str) {
+    match kind {
+        "sleep" | "shutdown" => {
+            let (what, action) = if kind == "sleep" { ("put the computer to sleep", AfterAll::Sleep) } else { ("shut the computer down", AfterAll::Shutdown) };
+            let dialog = adw::AlertDialog::builder()
+                .heading(format!("{} when downloads finish?", if kind == "sleep" { "Sleep" } else { "Shut down" }))
+                .body(format!("About 30 seconds after the last download finishes, the computer will {what}. You can change your mind in Downloads > When downloads finish."))
+                .build();
+            dialog.add_response("cancel", "Cancel");
+            dialog.add_response("ok", "Yes");
+            dialog.set_response_appearance("ok", adw::ResponseAppearance::Destructive);
+            dialog.set_default_response(Some("cancel"));
+            dialog.set_close_response("cancel");
+            let u = ui.clone();
+            dialog.connect_response(None, move |_, r| {
+                if r == "ok" {
+                    send(&u, Request::SetAfterAll(action.clone()));
+                } else {
+                    crate::menus::sync_after_all(&u, &u.after_all.borrow().clone()); // put the radio button back
+                }
+            });
+            dialog.present(Some(&ui.window));
+        }
+        "command" => {
+            let entry = gtk::Entry::builder().placeholder_text("for example: notify-send \"Downloads finished\"").width_chars(48).activates_default(true).build();
+            let dialog = adw::AlertDialog::builder().heading("Run a command when downloads finish").body("Runs once, about 30 seconds after the last download finishes.").extra_child(&entry).build();
+            dialog.add_response("cancel", "Cancel");
+            dialog.add_response("ok", "Arm");
+            dialog.set_response_appearance("ok", adw::ResponseAppearance::Suggested);
+            dialog.set_default_response(Some("ok"));
+            dialog.set_close_response("cancel");
+            let u = ui.clone();
+            dialog.connect_response(None, move |_, r| {
+                let command = entry.text().trim().to_string();
+                if r == "ok" && !command.is_empty() {
+                    send(&u, Request::SetAfterAll(AfterAll::Command { command }));
+                } else {
+                    crate::menus::sync_after_all(&u, &u.after_all.borrow().clone());
+                }
+            });
+            dialog.present(Some(&ui.window));
+        }
+        _ => send(ui, Request::SetAfterAll(AfterAll::Nothing)),
+    }
 }

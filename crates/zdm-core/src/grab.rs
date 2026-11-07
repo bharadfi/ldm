@@ -56,7 +56,7 @@ fn is_page(u: &Url) -> bool {
     e.is_empty() || PAGE_EXTS.contains(&e.as_str())
 }
 
-fn percent_decode(s: &str) -> String {
+pub fn percent_decode(s: &str) -> String {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;

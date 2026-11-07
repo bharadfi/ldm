@@ -63,6 +63,14 @@ pub struct AddRequest {
     /// Queue it for immediate start (default) or add it paused.
     #[serde(default = "yes")]
     pub start: bool,
+    /// Add another task even if the same link is already queued, running, paused or failed
+    /// (by default the existing task is returned, and resumed if it was stopped).
+    #[serde(default)]
+    pub allow_duplicate: bool,
+    /// Name and password for sites that ask for Basic or Digest login. (`http://user:pass@host/…` links work too.)
+    /// Kept in the daemon's private database, never shown in the task list.
+    #[serde(default)]
+    pub auth: Option<(String, String)>,
 }
 
 fn yes() -> bool {
@@ -157,6 +165,42 @@ pub struct Settings {
     pub proxy: Option<String>,
     /// Parent of the per-category download folders (absolute path).
     pub download_root: String,
+    /// Rate cap for all downloads together in KiB/s; 0 = unlimited.
+    #[serde(default)]
+    pub global_limit_kib: u64,
+    /// Own folder for a category (`Video`, `Documents`, ...), instead of `<download_root>/<category>`.
+    #[serde(default)]
+    pub category_dirs: std::collections::BTreeMap<String, String>,
+    /// How many times a download that failed on a network problem is retried by itself (0..=20).
+    #[serde(default = "default_auto_retries")]
+    pub auto_retries: u32,
+    /// Shell command run after each finished download (for example a virus scan). The file is in `$ZDM_FILE`.
+    #[serde(default)]
+    pub post_command: Option<String>,
+}
+
+fn default_auto_retries() -> u32 {
+    3
+}
+
+/// What to do once every running and queued download is done (one shot, armed by the user).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AfterAll {
+    #[default]
+    Nothing,
+    Sleep,
+    Shutdown,
+    Command { command: String },
+}
+
+impl AfterAll {
+    pub fn validate(&self) -> Result<(), String> {
+        match self {
+            AfterAll::Command { command } if command.trim().is_empty() || command.len() > 1000 || command.contains('\0') => Err("the command must be 1 to 1000 characters".into()),
+            _ => Ok(()),
+        }
+    }
 }
 
 impl Settings {
@@ -172,6 +216,19 @@ impl Settings {
         }
         if !std::path::Path::new(&self.download_root).is_absolute() {
             return Err("download folder must be an absolute path".into());
+        }
+        if self.auto_retries > 20 {
+            return Err("automatic retries must be between 0 and 20".into());
+        }
+        for (cat, dir) in &self.category_dirs {
+            if cat.trim().is_empty() || !std::path::Path::new(dir).is_absolute() {
+                return Err(format!("the folder for category \"{cat}\" must be an absolute path"));
+            }
+        }
+        if let Some(c) = &self.post_command {
+            if c.trim().is_empty() || c.len() > 1000 || c.contains('\0') {
+                return Err("the after-download command must be 1 to 1000 characters".into());
+            }
         }
         Ok(())
     }
@@ -195,6 +252,8 @@ pub enum Request {
     MoveTask { id: i64, queue: String },
     GetSettings,
     SetSettings(Settings),
+    GetAfterAll,
+    SetAfterAll(AfterAll),
     /// Crawl for files (can take a while; answered with `Links`).
     Grab(GrabRequest),
     Ping,
@@ -209,6 +268,7 @@ pub enum Response {
     Tasks { tasks: Vec<TaskInfo> },
     Queues { queues: Vec<QueueInfo> },
     Settings(Settings),
+    AfterAll(AfterAll),
     Links { links: Vec<GrabLink> },
     Error { message: String },
 }
@@ -314,13 +374,29 @@ mod tests {
 
     #[test]
     fn settings_validation() {
-        let ok = Settings { connections: 8, speed_limit_kib: 0, proxy: None, download_root: "/tmp/x".into() };
+        let ok = Settings { connections: 8, speed_limit_kib: 0, proxy: None, download_root: "/tmp/x".into(), global_limit_kib: 0, category_dirs: Default::default(), auto_retries: 3, post_command: None };
         assert!(ok.validate().is_ok());
         assert!(Settings { connections: 0, ..ok.clone() }.validate().is_err());
         assert!(Settings { connections: 33, ..ok.clone() }.validate().is_err());
         assert!(Settings { proxy: Some("ftp://p".into()), ..ok.clone() }.validate().is_err());
         assert!(Settings { proxy: Some("socks5://127.0.0.1:1080".into()), ..ok.clone() }.validate().is_ok());
+        assert!(Settings { auto_retries: 21, ..ok.clone() }.validate().is_err());
+        assert!(Settings { post_command: Some("  ".into()), ..ok.clone() }.validate().is_err());
+        assert!(Settings { post_command: Some("clamscan \"$ZDM_FILE\"".into()), ..ok.clone() }.validate().is_ok());
+        let mut dirs = std::collections::BTreeMap::new();
+        dirs.insert("Video".to_string(), "movies".to_string());
+        assert!(Settings { category_dirs: dirs, ..ok.clone() }.validate().is_err());
         assert!(Settings { download_root: "relative".into(), ..ok }.validate().is_err());
+    }
+
+    #[test]
+    fn old_settings_files_still_load_and_after_all_is_validated() {
+        let s: Settings = serde_json::from_str(r#"{"connections":4,"speed_limit_kib":0,"proxy":null,"download_root":"/d"}"#).unwrap();
+        assert_eq!((s.global_limit_kib, s.auto_retries, s.post_command), (0, 3, None));
+        assert!(AfterAll::Command { command: String::new() }.validate().is_err());
+        assert!(AfterAll::Shutdown.validate().is_ok());
+        let j = serde_json::to_string(&AfterAll::Command { command: "x".into() }).unwrap();
+        assert_eq!(j, r#"{"kind":"command","command":"x"}"#);
     }
 
     #[test]

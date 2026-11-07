@@ -43,6 +43,7 @@ pub fn write_frame(w: &mut impl Write, payload: &[u8]) -> io::Result<()> {
 
 /// A validated message from the extension.
 #[derive(Debug, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 pub enum Msg {
     Ping,
     Add(AddRequest),

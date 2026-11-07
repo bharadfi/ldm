@@ -97,4 +97,8 @@ tray; the self-test skips it. `zdm-gui --background` starts hidden (autostart en
 Grabber/video: `zdm-core/src/grab.rs` (crawler, own tag scanner), `zdm-core/src/hls.rs` (HLS + AES-128 + ffmpeg remux, `ZDM_FFMPEG=none|/path`),
 daemon `Request::Grab` and `.m3u8` tasks (`Manager::execute_hls`, work dir `<dest>.hls/`), GUI `grabber.rs`, extension sniffer + `links.html`.
 `testserver::serve_site` serves canned pages for crawler/HLS tests; `tools/rangesrv.py` has `/site/` pages for the GUI self-test.
+Engine features: shared adjustable `zdm_core::Limiter` (global limit), `digest.rs` (Credentials learn the 401 challenge and sign), `ftp.rs` (suppaftp, fake
+server in `testserver::start_ftp`), daemon: duplicates, auto-retry (`is_transient`), `AfterAll` one-shot with injectable executor (`set_executor`, tests never
+power off), post-download command, per-category folders. Credentials live in the private task headers (`x-zdm-userinfo`), never in the visible URL.
+CLI: `zdm grab|settings|after`, `zdm add --user NAME:PASS --again`. Settings fields all have serde defaults so old settings.json files still load.
 

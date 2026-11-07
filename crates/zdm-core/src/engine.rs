@@ -1,6 +1,7 @@
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -12,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
-use crate::probe::{build_client, probe, Probe};
+use crate::probe::{build_client, Probe};
 
 #[derive(Clone, Debug)]
 pub struct Options {
@@ -29,8 +30,12 @@ pub struct Options {
     pub proxy: Option<String>,
     /// HTTP Basic credentials. Marked sensitive, so reqwest does not forward them across hosts on redirect.
     pub auth: Option<(String, String)>,
-    /// Total download rate cap in bytes per second, shared by all connections.
+    /// Total download rate cap in bytes per second, shared by all connections of this download.
     pub limit_bps: Option<u64>,
+    /// Rate cap shared with other downloads (the global limit). Applied together with `limit_bps`.
+    pub shared_limit: Option<Arc<Limiter>>,
+    /// Name and password, and the Digest challenge learned from the server (shared by all connections).
+    pub creds: Arc<crate::digest::Credentials>,
     /// Cancel the download; partial data and resume state are kept.
     pub cancel: CancellationToken,
 }
@@ -68,6 +73,8 @@ impl Default for Options {
             proxy: None,
             auth: None,
             limit_bps: None,
+            shared_limit: None,
+            creds: Arc::default(),
             cancel: CancellationToken::new(),
         }
     }
@@ -85,32 +92,62 @@ impl std::fmt::Display for ResumeInvalid {
 
 impl std::error::Error for ResumeInvalid {}
 
-/// Paces all connections to a shared byte rate.
-struct Limiter {
-    bps: u64,
+/// Paces every user of it to one byte rate. `0` means unlimited. The rate can be changed while in use.
+pub struct Limiter {
+    bps: AtomicU64,
     next: Mutex<std::time::Instant>,
 }
 
-impl Limiter {
-    fn new(bps: u64) -> Self {
-        Self { bps: bps.max(1), next: Mutex::new(std::time::Instant::now()) }
-    }
-
-    async fn wait(&self, n: usize) {
-        let delay = {
-            let mut next = self.next.lock().unwrap();
-            let now = std::time::Instant::now();
-            let start = (*next).max(now);
-            *next = start + Duration::from_secs_f64(n as f64 / self.bps as f64);
-            start.saturating_duration_since(now)
-        };
-        if !delay.is_zero() {
-            tokio::time::sleep(delay).await;
-        }
+impl std::fmt::Debug for Limiter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Limiter({} B/s)", self.bps.load(Ordering::Relaxed))
     }
 }
 
-type Lim = Option<Arc<Limiter>>;
+impl Limiter {
+    pub fn new(bps: u64) -> Self {
+        Self { bps: AtomicU64::new(bps), next: Mutex::new(std::time::Instant::now()) }
+    }
+
+    pub fn set_rate(&self, bps: u64) {
+        self.bps.store(bps, Ordering::Relaxed);
+    }
+
+    /// Reserve a slot for `n` bytes; how long the caller has to wait for it.
+    fn reserve(&self, n: usize) -> Duration {
+        let bps = self.bps.load(Ordering::Relaxed);
+        if bps == 0 {
+            return Duration::ZERO;
+        }
+        let mut next = self.next.lock().unwrap();
+        let now = std::time::Instant::now();
+        let start = (*next).max(now);
+        *next = start + Duration::from_secs_f64(n as f64 / bps as f64);
+        start.saturating_duration_since(now)
+    }
+}
+
+/// What every request of one download needs: the speed limiters (its own cap and the shared global one; waiting
+/// for both takes the longer delay, not the sum) and the credentials.
+#[derive(Clone, Default)]
+pub(crate) struct Ctx {
+    own: Option<Arc<Limiter>>,
+    shared: Option<Arc<Limiter>>,
+    creds: Arc<crate::digest::Credentials>,
+}
+
+impl Ctx {
+    pub(crate) fn from_opts(opts: &Options) -> Ctx {
+        Ctx { own: opts.limit_bps.map(|b| Arc::new(Limiter::new(b))), shared: opts.shared_limit.clone(), creds: opts.creds.clone() }
+    }
+
+    pub(crate) async fn wait(&self, n: usize) {
+        let d = [&self.own, &self.shared].into_iter().flatten().map(|l| l.reserve(n)).max().unwrap_or_default();
+        if !d.is_zero() {
+            tokio::time::sleep(d).await;
+        }
+    }
+}
 
 /// Half-open byte range `[start, end)` with a write cursor `pos`.
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -201,7 +238,7 @@ fn write_at(f: &File, mut buf: &[u8], mut off: u64) -> io::Result<()> {
 /// (`total` is 0 when unknown).
 pub async fn download(url: &str, dest: &Path, opts: &Options, on_progress: impl Fn(u64, u64) + Send + Sync + 'static) -> Result<()> {
     let client = build_client(opts)?;
-    let p = probe(&client, url).await?;
+    let p = crate::probe::probe_with(&client, url, &opts.creds).await?;
     download_probed(&client, url, &p, dest, opts, on_progress).await
 }
 
@@ -216,7 +253,7 @@ pub async fn download_probed(
 ) -> Result<()> {
     let part = sibling(dest, ".part");
     let side = sibling(dest, ".part.zdm");
-    let lim: Lim = opts.limit_bps.map(|b| Arc::new(Limiter::new(b)));
+    let lim = Ctx::from_opts(opts);
     let on_progress = Arc::new(on_progress);
     match (p.size, p.ranges) {
         (Some(size), true) => {
@@ -226,7 +263,7 @@ pub async fn download_probed(
             if matches!(&r, Err(e) if e.downcast_ref::<ResumeInvalid>().is_some()) {
                 let _ = std::fs::remove_file(&part);
                 let _ = std::fs::remove_file(&side);
-                let p2 = probe(client, url).await?;
+                let p2 = crate::probe::probe_with(client, url, &opts.creds).await?;
                 r = match (p2.size, p2.ranges) {
                     (Some(size2), true) => {
                         let cb = on_progress.clone();
@@ -256,14 +293,18 @@ async fn single(
     url: &str,
     size: Option<u64>,
     part: &Path,
-    lim: &Lim,
+    lim: &Ctx,
     cancel: &CancellationToken,
     on_progress: impl Fn(u64, u64),
 ) -> Result<()> {
-    let resp = tokio::select! {
+    let mut resp = tokio::select! {
         _ = cancel.cancelled() => return Err(Cancelled.into()),
-        r = client.get(url).send() => r?.error_for_status()?,
+        r = lim.creds.sign(client.get(url), url).send() => r?,
     };
+    if lim.creds.learn(&resp) {
+        resp = lim.creds.sign(client.get(url), url).send().await?;
+    }
+    let resp = resp.error_for_status()?;
     let file = File::create(part)?;
     let mut off = 0u64;
     let mut last = std::time::Instant::now();
@@ -275,9 +316,7 @@ async fn single(
         };
         let Some(chunk) = next else { break };
         let chunk = chunk?;
-        if let Some(l) = lim {
-            l.wait(chunk.len()).await;
-        }
+        lim.wait(chunk.len()).await;
         write_at(&file, &chunk, off)?;
         off += chunk.len() as u64;
         if last.elapsed() >= Duration::from_secs(1) {
@@ -332,7 +371,7 @@ async fn ranged(
     part: &Path,
     side: &Path,
     opts: &Options,
-    lim: &Lim,
+    lim: &Ctx,
     on_progress: impl Fn(u64, u64) + Send + Sync + 'static,
 ) -> Result<()> {
     let segs = load_sidecar(side, part, url, p, size).unwrap_or_else(|| plan(size, opts.connections, opts.min_split));
@@ -419,7 +458,7 @@ async fn run_segment(
     idx: usize,
     validator: Option<&str>,
     retries: u32,
-    lim: &Lim,
+    lim: &Ctx,
 ) -> Result<()> {
     let mut attempt = 0;
     loop {
@@ -468,13 +507,16 @@ async fn fetch_range(
     pos: u64,
     end: u64,
     validator: Option<&str>,
-    lim: &Lim,
+    lim: &Ctx,
 ) -> std::result::Result<(), FetchError> {
-    let mut req = client.get(url).header(RANGE, format!("bytes={}-{}", pos, end - 1));
+    let mut req = lim.creds.sign(client.get(url), url).header(RANGE, format!("bytes={}-{}", pos, end - 1));
     if let Some(v) = validator {
         req = req.header(IF_RANGE, v);
     }
     let resp = req.send().await.map_err(|e| FetchError::Retry(e.into()))?;
+    if lim.creds.learn(&resp) {
+        return Err(FetchError::Retry(anyhow!("the server asked for Digest authentication; retrying signed")));
+    }
     match resp.status() {
         StatusCode::PARTIAL_CONTENT => {}
         // With If-Range, a 200 means the resource changed; without it the server broke the Range contract.
@@ -492,9 +534,7 @@ async fn fetch_range(
     let mut stream = resp.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| FetchError::Retry(e.into()))?;
-        if let Some(l) = lim {
-            l.wait(chunk.len()).await;
-        }
+        lim.wait(chunk.len()).await;
         let mut data: &[u8] = &chunk;
         while !data.is_empty() {
             // Another worker may have taken the tail of this segment; write only what is still ours.

@@ -20,11 +20,14 @@ pub struct GuiPrefs {
     /// Desktop notification when a download finishes or fails.
     #[serde(default = "yes")]
     pub notifications: bool,
+    /// Offer to download a link when one is copied (off by default).
+    #[serde(default)]
+    pub monitor_clipboard: bool,
 }
 
 impl Default for GuiPrefs {
     fn default() -> Self {
-        GuiPrefs { auto_progress: true, close_to_tray: true, notifications: true }
+        GuiPrefs { auto_progress: true, close_to_tray: true, notifications: true, monitor_clipboard: false }
     }
 }
 
@@ -81,7 +84,7 @@ mod tests {
         assert!(serde_json::from_str::<GuiPrefs>("{}").unwrap().auto_progress);
         assert!(!serde_json::from_str::<GuiPrefs>(r#"{"auto_progress":false}"#).unwrap().auto_progress);
         let p = serde_json::from_str::<GuiPrefs>(r#"{"auto_progress":false}"#).unwrap();
-        assert!(p.close_to_tray && p.notifications);
+        assert!(p.close_to_tray && p.notifications && !p.monitor_clipboard);
     }
 
     #[test]

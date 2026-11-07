@@ -18,6 +18,8 @@ pub struct Config {
     /// ETag is "v1" for the first request and "v2" afterwards (file replaced mid-download).
     pub flip_etag: bool,
     pub disposition: Option<String>,
+    /// Require HTTP Digest authentication with this (user, password).
+    pub digest: Option<(String, String)>,
 }
 
 #[derive(Clone, Debug)]
@@ -102,6 +104,23 @@ async fn handle(mut s: TcpStream, cfg: Config, log: Arc<Mutex<Vec<Req>>>, c: Arc
         format!("HTTP/1.1 {status} {reason}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
     };
 
+    if let Some((user, pass)) = &cfg.digest {
+        let ok = header("authorization").is_some_and(|h| {
+            let p = crate::digest::parse_params(h.strip_prefix("Digest ").unwrap_or("#"));
+            let get = |k: &str| p.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone()).unwrap_or_default();
+            let uri = head.split_whitespace().nth(1).unwrap_or("/");
+            h.starts_with("Digest ")
+                && get("username") == *user
+                && get("nonce") == "n0nce-for-tests"
+                && get("uri") == uri
+                && get("response") == crate::digest::compute_response("MD5", user, pass, "zdm-test", "GET", uri, "n0nce-for-tests", true, &get("nc"), &get("cnonce"))
+        });
+        if !ok {
+            log.lock().unwrap().push(Req { range, status: 401 });
+            let r = "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Digest realm=\"zdm-test\", nonce=\"n0nce-for-tests\", qop=\"auth\", algorithm=MD5\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            return s.write_all(r.as_bytes()).await;
+        }
+    }
     if let Some(expected_auth) = &cfg.auth {
         if header("authorization").as_deref() != Some(expected_auth.as_str()) {
             log.lock().unwrap().push(Req { range, status: 401 });
@@ -209,4 +228,110 @@ pub async fn serve_site(routes: Routes) -> Site {
         }
     });
     Site { addr, hits }
+}
+
+/// A small passive-mode FTP server for tests: `files` maps a path (`/a.bin`) to its content. With `login`
+/// only that (user, password) is accepted. `log` records the commands received (`REST 100`, `RETR /a.bin`, ...).
+pub struct FtpServer {
+    pub addr: SocketAddr,
+    pub log: Arc<Mutex<Vec<String>>>,
+}
+
+impl FtpServer {
+    pub fn url(&self, path: &str) -> String {
+        format!("ftp://{}{}", self.addr, path)
+    }
+    pub fn commands(&self) -> Vec<String> {
+        self.log.lock().unwrap().clone()
+    }
+}
+
+pub async fn start_ftp(files: std::collections::HashMap<String, Vec<u8>>, login: Option<(String, String)>, allow_rest: bool) -> FtpServer {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let (files, l2) = (Arc::new(files), log.clone());
+    tokio::spawn(async move {
+        loop {
+            let Ok((sock, _)) = listener.accept().await else { return };
+            let (files, log, login) = (files.clone(), l2.clone(), login.clone());
+            tokio::spawn(async move {
+                let _ = ftp_session(sock, files, log, login, allow_rest).await;
+            });
+        }
+    });
+    FtpServer { addr, log }
+}
+
+async fn ftp_session(sock: TcpStream, files: Arc<std::collections::HashMap<String, Vec<u8>>>, log: Arc<Mutex<Vec<String>>>, login: Option<(String, String)>, allow_rest: bool) -> std::io::Result<()> {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    let (rd, mut wr) = sock.into_split();
+    let mut rd = BufReader::new(rd);
+    wr.write_all(b"220 zdm test ftp\r\n").await?;
+    let (mut user_ok, mut passive, mut rest, mut line) = (login.is_none(), None::<TcpListener>, 0usize, String::new());
+    let mut given_user = String::new();
+    loop {
+        line.clear();
+        if rd.read_line(&mut line).await? == 0 {
+            return Ok(());
+        }
+        let cmd = line.trim_end().to_string();
+        log.lock().unwrap().push(cmd.clone());
+        let (verb, arg) = cmd.split_once(' ').map_or((cmd.as_str(), ""), |(v, a)| (v, a));
+        let reply: String = match verb.to_ascii_uppercase().as_str() {
+            "USER" => {
+                given_user = arg.to_string();
+                "331 password please\r\n".into()
+            }
+            "PASS" => match &login {
+                Some((u, p)) if *u != given_user || p != arg => "530 login incorrect\r\n".into(),
+                Some(_) => {
+                    user_ok = true;
+                    "230 welcome\r\n".into()
+                }
+                None => "230 welcome\r\n".into(),
+            },
+            _ if !user_ok => "530 please log in\r\n".into(),
+            "SYST" => "215 UNIX Type: L8\r\n".into(),
+            "FEAT" => "211 no features\r\n".into(),
+            "TYPE" => "200 type set\r\n".into(),
+            "PWD" => "257 \"/\"\r\n".into(),
+            "EPSV" | "PASV" => {
+                let l = TcpListener::bind("127.0.0.1:0").await?;
+                let port = l.local_addr()?.port();
+                passive = Some(l);
+                if verb.eq_ignore_ascii_case("EPSV") {
+                    format!("229 Entering Extended Passive Mode (|||{port}|)\r\n")
+                } else {
+                    format!("227 Entering Passive Mode (127,0,0,1,{},{})\r\n", port >> 8, port & 255)
+                }
+            }
+            "SIZE" => match files.get(arg) {
+                Some(f) => format!("213 {}\r\n", f.len()),
+                None => "550 no such file\r\n".into(),
+            },
+            "REST" if allow_rest => {
+                rest = arg.parse().unwrap_or(0);
+                "350 restarting\r\n".into()
+            }
+            "REST" => "502 REST not supported\r\n".into(),
+            "RETR" => match (files.get(arg), passive.take()) {
+                (Some(f), Some(l)) => {
+                    wr.write_all(b"150 sending\r\n").await?;
+                    let (mut data, _) = l.accept().await?;
+                    data.write_all(&f[rest.min(f.len())..]).await?;
+                    data.shutdown().await?;
+                    rest = 0;
+                    "226 done\r\n".into()
+                }
+                _ => "550 no such file\r\n".into(),
+            },
+            "QUIT" => {
+                wr.write_all(b"221 bye\r\n").await?;
+                return Ok(());
+            }
+            _ => "502 not implemented\r\n".into(),
+        };
+        wr.write_all(reply.as_bytes()).await?;
+    }
 }

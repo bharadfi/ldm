@@ -51,9 +51,21 @@ pub fn build_client(opts: &Options) -> Result<Client> {
 /// Learn size / range support with a single `Range: bytes=0-0` request.
 /// Network errors and 5xx/429 are retried a few times.
 pub async fn probe(client: &Client, url: &str) -> Result<Probe> {
+    probe_with(client, url, &crate::digest::Credentials::default()).await
+}
+
+/// Like [`probe`], answering a Digest challenge with `creds` (and remembering it for the download that follows).
+pub async fn probe_with(client: &Client, url: &str, creds: &crate::digest::Credentials) -> Result<Probe> {
     let mut attempt = 0u32;
+    let mut learned = false;
     let resp = loop {
-        let r = client.get(url).header(RANGE, "bytes=0-0").send().await;
+        let r = creds.sign(client.get(url), url).header(RANGE, "bytes=0-0").send().await;
+        if let Ok(resp) = &r {
+            if !learned && creds.learn(resp) {
+                learned = true;
+                continue;
+            }
+        }
         let transient = match &r {
             Ok(resp) => resp.status().is_server_error() || resp.status() == StatusCode::TOO_MANY_REQUESTS,
             Err(e) => e.is_connect() || e.is_timeout() || e.is_request(),

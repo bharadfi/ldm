@@ -28,7 +28,7 @@ use gtk::{gio, glib};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 use progress::ProgressWin;
 use view::Section;
-use zdm_proto::{AddRequest, GrabLink, QueueInfo, Request, Response, Settings, State, TaskInfo};
+use zdm_proto::{AddRequest, AfterAll, GrabLink, QueueInfo, Request, Response, Settings, State, TaskInfo};
 
 static BACKGROUND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -59,6 +59,7 @@ enum Event {
     Queues(Vec<QueueInfo>),
     Settings(Settings),
     Links(Vec<GrabLink>),
+    AfterAll(AfterAll),
     GrabFailed(String),
     Offline(String),
     Failure(String),
@@ -123,6 +124,9 @@ fn worker(events: async_channel::Sender<Event>, mut cmds: tokio::sync::mpsc::Unb
                     if let Ok(Response::Settings(s)) = zdm_proto::call(&Request::GetSettings).await {
                         let _ = events.send(Event::Settings(s)).await;
                     }
+                    if let Ok(Response::AfterAll(a)) = zdm_proto::call(&Request::GetAfterAll).await {
+                        let _ = events.send(Event::AfterAll(a)).await;
+                    }
                 }
                 Ok(_) => {}
                 Err(e) => {
@@ -172,6 +176,7 @@ pub struct Ui {
     pub notify_ready: std::cell::Cell<bool>,
     pub last_tip: RefCell<String>,
     pub grab: RefCell<Option<Rc<grabber::GrabWin>>>,
+    pub after_all: RefCell<AfterAll>,
     pub toolbar_box: gtk::Box,
     pub sidebar_scroll: gtk::ScrolledWindow,
     pub latest: RefCell<Vec<TaskInfo>>,
@@ -375,12 +380,14 @@ fn build_ui(app: &adw::Application) -> Rc<Ui> {
         notify_ready: std::cell::Cell::new(false),
         last_tip: RefCell::default(),
         grab: RefCell::default(),
+        after_all: RefCell::default(),
         toolbar_box: toolbar_box.clone(),
         sidebar_scroll: sidebar_scroll.clone(),
         latest: RefCell::default(),
         progress: Rc::default(),
     });
     install_menu(&ui);
+    install_inputs(&ui);
     menus::install(&ui, app, &menubar_slot);
     for (btn, action) in [(&b_grab, "win.grabber"), (&b_options, "win.options"), (&b_sched, "win.scheduler"), (&b_qstart, "win.queue-start"), (&b_qstop, "win.queue-stop")] {
         let w = window.clone();
@@ -496,6 +503,11 @@ fn build_ui(app: &adw::Application) -> Rc<Ui> {
                         apply_queues(&ui, names);
                     }
                     Event::Settings(s) => *ui.settings.borrow_mut() = Some(s),
+                    Event::AfterAll(a) => {
+                        if *ui.after_all.borrow() != a {
+                            menus::sync_after_all(&ui, &a);
+                        }
+                    }
                     Event::Links(l) => grabber::show_results(&ui, l),
                     Event::GrabFailed(m) => grabber::show_error(&ui, &m),
                     Event::Offline(msg) => {
@@ -552,8 +564,14 @@ fn all_rows(ui: &Ui) -> Vec<Picked> {
 }
 
 fn add_dialog(ui: &Rc<Ui>) {
-    let entry = gtk::Entry::builder().placeholder_text("https://example.com/file.zip").activates_default(true).width_chars(46).build();
-    let dialog = adw::AlertDialog::builder().heading("Add download").body("Paste the link to download.").extra_child(&entry).build();
+    let entry = gtk::Entry::builder().placeholder_text("https://example.com/file.zip  (http, https or ftp)").activates_default(true).width_chars(46).build();
+    let user = gtk::Entry::builder().placeholder_text("User name (only if the site asks)").activates_default(true).build();
+    let pass = gtk::PasswordEntry::builder().placeholder_text("Password").show_peek_icon(true).activates_default(true).build();
+    let form = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(8).build();
+    form.append(&entry);
+    form.append(&user);
+    form.append(&pass);
+    let dialog = adw::AlertDialog::builder().heading("Add download").body("Paste the link to download.").extra_child(&form).build();
     dialog.add_response("cancel", "Cancel");
     dialog.add_response("add", "Download");
     dialog.set_response_appearance("add", adw::ResponseAppearance::Suggested);
@@ -562,7 +580,9 @@ fn add_dialog(ui: &Rc<Ui>) {
     dialog.connect_response(None, move |_, id| {
         let url = entry.text().trim().to_string();
         if id == "add" && !url.is_empty() {
-            send(&u, Request::Add(AddRequest { url, start: true, ..Default::default() }));
+            let name = user.text().trim().to_string();
+            let auth = (!name.is_empty()).then(|| (name, pass.text().to_string()));
+            send(&u, Request::Add(AddRequest { url, start: true, auth, ..Default::default() }));
         }
     });
     dialog.present(Some(&ui.window));
@@ -735,7 +755,13 @@ fn update_status(ui: &Ui) {
     let active = sp.values().filter(|e| e.2 > 0.0).count();
     let total: f64 = sp.values().map(|e| e.2).sum();
     let rate = if total > 1.0 { format!(" · {}/s", fmt::bytes(total as u64)) } else { String::new() };
-    ui.status.set_text(&format!("{shown} download(s) shown · {active} active{rate}"));
+    let after = match &*ui.after_all.borrow() {
+        AfterAll::Nothing => String::new(),
+        AfterAll::Sleep => " · will sleep when downloads finish".to_string(),
+        AfterAll::Shutdown => " · will shut down when downloads finish".to_string(),
+        AfterAll::Command { .. } => " · will run a command when downloads finish".to_string(),
+    };
+    ui.status.set_text(&format!("{shown} download(s) shown · {active} active{rate}{after}"));
 }
 
 fn task_by_id(ui: &Ui, id: i64) -> Option<TaskInfo> {
@@ -854,7 +880,7 @@ fn install_menu(ui: &Rc<Ui>) {
     mk("again", Box::new(|u, sel| {
         for p in &sel {
             if let Some(t) = task_by_id(u, p.id) {
-                send(u, Request::Add(AddRequest { url: t.url, start: true, ..Default::default() }));
+                send(u, Request::Add(AddRequest { url: t.url, start: true, allow_duplicate: true, ..Default::default() }));
             }
         }
     }));
@@ -939,6 +965,17 @@ fn selftest(ui: &Rc<Ui>, base: String) {
             }
         }));
     }
+    // the armed "when downloads finish" action must round-trip through the daemon into the menu state
+    at(5, Box::new(|u| send(u, Request::SetAfterAll(AfterAll::Command { command: "true".into() }))));
+    at(8, Box::new(|u| {
+        let ok = matches!(&*u.after_all.borrow(), AfterAll::Command { command } if command == "true");
+        let state = u.window.lookup_action("after-all").and_then(|a| a.state()).and_then(|v| v.get::<String>());
+        eprintln!("SELFTEST after-all armed: {ok}, menu state {state:?}");
+        if !ok || state.as_deref() != Some("command") {
+            std::process::exit(5);
+        }
+        send(u, Request::SetAfterAll(AfterAll::Nothing));
+    }));
     at(4, Box::new(|u| {
         // open a progress window for every download, as double-clicking would
         let ids: Vec<i64> = u.latest.borrow().iter().map(|t| t.id).collect();
@@ -1063,4 +1100,44 @@ fn notify_and_tray(ui: &Rc<Ui>, tasks: &[TaskInfo]) {
             *ui.last_tip.borrow_mut() = tip;
         }
     }
+}
+
+/// Links dropped on the window are downloaded; copied links are offered (when enabled in Options).
+fn install_inputs(ui: &Rc<Ui>) {
+    let drop = gtk::DropTarget::new(String::static_type(), gtk::gdk::DragAction::COPY);
+    let u = ui.clone();
+    drop.connect_drop(move |_, value, _, _| {
+        let Ok(text) = value.get::<String>() else { return false };
+        let urls = helpers::parse_urls(&text);
+        for url in &urls {
+            send(&u, Request::Add(AddRequest { url: url.clone(), start: true, ..Default::default() }));
+        }
+        if !urls.is_empty() {
+            u.toasts.add_toast(adw::Toast::new(&format!("Added {} download(s)", urls.len())));
+        }
+        !urls.is_empty()
+    });
+    ui.window.add_controller(drop);
+
+    let last = Rc::new(RefCell::new(String::new()));
+    let u = ui.clone();
+    ui.window.clipboard().connect_changed(move |cb| {
+        if !u.prefs.borrow().monitor_clipboard {
+            return;
+        }
+        let (cb, u, last) = (cb.clone(), u.clone(), last.clone());
+        glib::spawn_future_local(async move {
+            let Ok(Some(text)) = cb.read_text_future().await else { return };
+            let urls = helpers::parse_urls(&text);
+            if urls.len() == 1 && helpers::looks_downloadable(&urls[0]) && *last.borrow() != urls[0] {
+                *last.borrow_mut() = urls[0].clone();
+                let toast = adw::Toast::new("Download the link you copied?");
+                toast.set_button_label(Some("Download"));
+                toast.set_action_name(Some("win.add-clipboard"));
+                toast.set_action_target_value(Some(&urls[0].to_variant()));
+                toast.set_timeout(10);
+                u.toasts.add_toast(toast);
+            }
+        });
+    });
 }

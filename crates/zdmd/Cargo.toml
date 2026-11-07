@@ -29,3 +29,4 @@ rand.workspace = true
 [dev-dependencies]
 zdm-core = { workspace = true, features = ["testserver"] }
 tempfile.workspace = true
+base64.workspace = true

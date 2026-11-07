@@ -4,12 +4,13 @@ use std::collections::HashMap;
 
 use zdm_proto::{State, TaskInfo, Window};
 
-/// URLs from pasted text: one per line (or whitespace separated), http/https only, duplicates dropped.
+/// URLs from pasted text: one per line (or whitespace separated), http/https/ftp only, duplicates dropped.
 pub fn parse_urls(text: &str) -> Vec<String> {
     let mut out: Vec<String> = vec![];
     for tok in text.split_whitespace() {
         let t = tok.trim_matches(|c| matches!(c, '<' | '>' | '"' | '\'' | ',' | ';'));
-        if (t.starts_with("http://") || t.starts_with("https://")) && t.len() > 8 && !out.iter().any(|u| u == t) {
+        let scheme_ok = t.starts_with("http://") || t.starts_with("https://") || t.starts_with("ftp://");
+        if scheme_ok && t.len() > 8 && !out.iter().any(|u| u == t) {
             out.push(t.to_string());
         }
     }
@@ -32,6 +33,24 @@ pub fn preset_extensions(index: usize, custom: &str) -> Vec<String> {
         _ => &[],
     };
     list.iter().map(|s| s.to_string()).collect()
+}
+
+/// Is a copied link worth offering to download? A single link to a known file type, a stream or an FTP address
+/// (copying an ordinary web page address must not trigger anything).
+pub fn looks_downloadable(url: &str) -> bool {
+    if url.starts_with("ftp://") {
+        return true;
+    }
+    let path = url.split(['?', '#']).next().unwrap_or("");
+    let last = path.rsplit('/').next().unwrap_or("");
+    let ext = match last.rsplit_once('.') {
+        Some((stem, e)) if !stem.is_empty() => e.to_ascii_lowercase(),
+        _ => return false,
+    };
+    ["zip", "7z", "rar", "gz", "bz2", "xz", "zst", "tar", "tgz", "iso", "img", "deb", "rpm", "appimage", "apk", "exe", "msi", "bin", "run", "sh",
+     "pdf", "epub", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "mp3", "flac", "ogg", "opus", "wav", "m4a", "aac",
+     "mp4", "mkv", "avi", "mov", "webm", "flv", "m4v", "m3u8"]
+        .contains(&ext.as_str())
 }
 
 pub const DAY_NAMES: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
@@ -97,9 +116,21 @@ mod tests {
 
     #[test]
     fn urls_are_extracted_and_deduped() {
-        let t = "https://a.org/x.zip\nnot a url\n<http://b.net/y> ftp://c/z\nhttps://a.org/x.zip, https://";
-        assert_eq!(parse_urls(t), vec!["https://a.org/x.zip", "http://b.net/y"]);
+        let t = "https://a.org/x.zip\nnot a url\n<http://b.net/y> ftp://c/z gopher://old/school\nhttps://a.org/x.zip, https://";
+        assert_eq!(parse_urls(t), vec!["https://a.org/x.zip", "http://b.net/y", "ftp://c/z"]);
         assert!(parse_urls("").is_empty());
+    }
+
+    #[test]
+    fn copied_links_worth_offering() {
+        assert!(looks_downloadable("https://x.org/dl/tool-1.2.tar.gz?mirror=3"));
+        assert!(looks_downloadable("https://x.org/a/b/movie.MP4"));
+        assert!(looks_downloadable("https://v.test/live/index.m3u8"));
+        assert!(looks_downloadable("ftp://mirror.test/pub/"));
+        assert!(!looks_downloadable("https://example.com/"));
+        assert!(!looks_downloadable("https://example.com/blog/post.html"));
+        assert!(!looks_downloadable("https://example.com/.zip"));
+        assert_eq!(parse_urls("ftp://m.test/f.iso http://a.b/c"), vec!["ftp://m.test/f.iso", "http://a.b/c"]);
     }
 
     #[test]

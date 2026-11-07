@@ -41,7 +41,11 @@ pub fn percent(t: &TaskInfo) -> i32 {
 pub fn status_label(t: &TaskInfo) -> String {
     match t.state {
         State::Completed => "Complete".into(),
-        State::Failed => format!("Error: {}", t.error.as_deref().unwrap_or("unknown")),
+        State::Failed => match t.error.as_deref() {
+            // the daemon is about to try again by itself
+            Some(e) if e.starts_with("Will retry") => "Waiting to retry".into(),
+            e => format!("Error: {}", e.unwrap_or("unknown")),
+        },
         State::Queued => "Queued".into(),
         State::Paused => match t.size {
             Some(s) if s > 0 => format!("Paused {:.1}%", t.downloaded as f64 * 100.0 / s as f64),
@@ -105,6 +109,8 @@ mod tests {
         let mut t = task(State::Failed, None, 0);
         t.error = Some("boom".into());
         assert_eq!(status_label(&t), "Error: boom");
+        t.error = Some("Will retry (attempt 1 of 3) in 20s: connection refused".into());
+        assert_eq!(status_label(&t), "Waiting to retry");
         assert_eq!(rate(&task(State::Paused, None, 0), 99.0), "");
     }
 }

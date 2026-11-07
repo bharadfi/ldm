@@ -10,8 +10,8 @@ use anyhow::{anyhow, bail, Result};
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use zdm_core::{build_client, download_probed, probe, Cancelled, Options};
-use zdm_proto::{AddRequest, GrabLink, GrabRequest, QueueInfo, Settings, State, TaskInfo};
+use zdm_core::{build_client, download_probed, Cancelled, Limiter, Options};
+use zdm_proto::{AddRequest, AfterAll, GrabLink, GrabRequest, QueueInfo, Settings, State, TaskInfo};
 
 use crate::categories::categorize;
 use crate::config::Config;
@@ -44,6 +44,10 @@ fn load_settings(cfg: &Config) -> Settings {
         speed_limit_kib: cfg.limit_bps.map_or(0, |b| b / 1024),
         proxy: None,
         download_root: cfg.download_root.to_string_lossy().into_owned(),
+        global_limit_kib: 0,
+        category_dirs: Default::default(),
+        auto_retries: 3,
+        post_command: None,
     };
     std::fs::read(settings_path(cfg)).ok().and_then(|b| serde_json::from_slice::<Settings>(&b).ok()).filter(|s| s.validate().is_ok()).unwrap_or(defaults)
 }
@@ -75,8 +79,70 @@ fn hls_stem(url: &str) -> String {
     if name.is_empty() { u.and_then(|u| u.host_str().map(str::to_string)).unwrap_or_else(|| "video".into()) } else { name }
 }
 
+/// Header name under which a task's credentials are kept with its other (stored, private) request headers.
+const AUTH_HEADER: &str = "x-zdm-userinfo";
+
+/// `http://user:pass@host/x` -> (`http://host/x`, Some((user, pass))). Any other string comes back unchanged.
+pub fn split_userinfo(url: &str) -> (String, Option<(String, String)>) {
+    let Ok(mut u) = url::Url::parse(url) else { return (url.to_string(), None) };
+    if u.username().is_empty() && u.password().is_none() {
+        return (url.to_string(), None);
+    }
+    let auth = (zdm_core::grab::percent_decode(u.username()), zdm_core::grab::percent_decode(u.password().unwrap_or("")));
+    let _ = u.set_username("");
+    let _ = u.set_password(None);
+    (u.to_string(), Some(auth))
+}
+
+/// Starts with this text so the scheduler can tell a pending automatic retry from a final failure.
+const RETRY_PREFIX: &str = "Will retry (attempt";
+
+/// Network trouble that may go away (worth retrying) versus errors that will not fix themselves.
+pub fn is_transient(msg: &str) -> bool {
+    let m = msg.to_ascii_lowercase();
+    const FINAL: [&str; 10] = ["only http", "bad proxy", "bad header", "bad credentials", "no such", "live stream", "unsupported", "could not decrypt", "not a web page", "is not a valid"];
+    if FINAL.iter().any(|k| m.contains(k)) {
+        return false;
+    }
+    // "server returned 404 Not Found for ..." / "HTTP status client error (404 Not Found) ..."
+    let code = |after: &str| m.find(after).and_then(|i| m[i + after.len()..].split(|c: char| !c.is_ascii_digit()).next()?.parse::<u16>().ok());
+    if let Some(c) = code("server returned ").or_else(|| code("client error (")) {
+        return c == 408 || c == 429 || c >= 500;
+    }
+    true
+}
+
+/// Carries out an "after all downloads" action on the real system.
+pub fn system_action(a: &AfterAll) {
+    use std::process::Command;
+    let r = match a {
+        AfterAll::Nothing => return,
+        AfterAll::Sleep => Command::new("systemctl").arg("suspend").status(),
+        AfterAll::Shutdown => Command::new("systemctl").arg("poweroff").status(),
+        AfterAll::Command { command } => Command::new("sh").arg("-c").arg(command).status(),
+    };
+    if let Err(e) = r {
+        eprintln!("after-all action {a:?} failed: {e}");
+    }
+}
+
+type Executor = Arc<dyn Fn(&AfterAll) + Send + Sync>;
+
+#[derive(Default)]
+struct AfterState {
+    action: AfterAll,
+    /// Something finished (or was still pending) since the action was armed.
+    armed_with_work: bool,
+    idle_since: Option<std::time::Instant>,
+}
+
 pub struct Manager {
     cfg: Config,
+    global: Arc<Limiter>,
+    retries: Mutex<HashMap<i64, u32>>,
+    retry_total: AtomicU64,
+    after: Mutex<AfterState>,
+    executor: Mutex<Executor>,
     settings: Mutex<Settings>,
     store: Mutex<Store>,
     running: Mutex<HashMap<i64, Running>>,
@@ -93,7 +159,8 @@ impl Manager {
 
     pub fn with_store(cfg: Config, store: Store, clock: Clock) -> Arc<Self> {
         let settings = load_settings(&cfg);
-        Arc::new(Self { cfg, settings: Mutex::new(settings), store: Mutex::new(store), running: Mutex::new(HashMap::new()), gen: AtomicU64::new(1), wake: Notify::new(), clock })
+        let global = Arc::new(Limiter::new(settings.global_limit_kib * 1024));
+        Arc::new(Self { cfg, global, retries: Mutex::default(), retry_total: AtomicU64::new(0), after: Mutex::default(), executor: Mutex::new(Arc::new(system_action)), settings: Mutex::new(settings), store: Mutex::new(store), running: Mutex::new(HashMap::new()), gen: AtomicU64::new(1), wake: Notify::new(), clock })
     }
 
     pub fn settings(&self) -> Settings {
@@ -104,6 +171,7 @@ impl Manager {
     pub fn set_settings(&self, s: Settings) -> Result<()> {
         s.validate().map_err(|e| anyhow!(e))?;
         save_settings(&settings_path(&self.cfg), &s)?;
+        self.global.set_rate(s.global_limit_kib * 1024);
         *self.settings.lock().unwrap() = s;
         Ok(())
     }
@@ -122,6 +190,62 @@ impl Manager {
         let cancel = CancellationToken::new();
         let found = tokio::time::timeout(Duration::from_secs(120), zdm_core::grab::crawl(&client, &g.url, &go, &cancel)).await.map_err(|_| anyhow!("the site took too long to explore"))??;
         Ok(found.into_iter().map(|f| GrabLink { url: f.url, name: f.name, ext: f.ext, from: f.from }).collect())
+    }
+
+    /// Total automatic retries scheduled so far (for tests and diagnostics).
+    pub fn retry_count(&self) -> u64 {
+        self.retry_total.load(Ordering::Relaxed)
+    }
+
+    pub fn after_all(&self) -> AfterAll {
+        self.after.lock().unwrap().action.clone()
+    }
+
+    /// Arm (or with `Nothing`, cancel) the one-shot action for when all downloads are done.
+    pub fn set_after_all(&self, a: AfterAll) -> Result<()> {
+        a.validate().map_err(|e| anyhow!(e))?;
+        let busy = self.has_active_work();
+        *self.after.lock().unwrap() = AfterState { action: a, armed_with_work: busy, idle_since: None };
+        Ok(())
+    }
+
+    /// Replace what carries out the after-all action (tests use this so nothing really shuts down).
+    pub fn set_executor(&self, f: impl Fn(&AfterAll) + Send + Sync + 'static) {
+        *self.executor.lock().unwrap() = Arc::new(f);
+    }
+
+    fn has_active_work(&self) -> bool {
+        if !self.running.lock().unwrap().is_empty() {
+            return true;
+        }
+        self.store().tasks().map(|t| t.iter().any(|r| matches!(r.info.state, State::Running | State::Queued))).unwrap_or(true)
+    }
+
+    fn check_after_all(&self) {
+        if self.after.lock().unwrap().action == AfterAll::Nothing {
+            return;
+        }
+        let busy = self.has_active_work();
+        let mut a = self.after.lock().unwrap();
+        if busy {
+            a.armed_with_work = true;
+            a.idle_since = None;
+            return;
+        }
+        if !a.armed_with_work {
+            return;
+        }
+        match a.idle_since {
+            None => a.idle_since = Some(std::time::Instant::now()),
+            Some(t) if t.elapsed() >= self.cfg.after_grace => {
+                let action = std::mem::take(&mut a.action);
+                *a = AfterState::default();
+                drop(a);
+                let run = self.executor.lock().unwrap().clone();
+                std::thread::spawn(move || run(&action));
+            }
+            Some(_) => {}
+        }
     }
 
     pub fn move_task(&self, id: i64, queue: &str) -> Result<()> {
@@ -143,13 +267,29 @@ impl Manager {
 
     // ---- API ----
 
-    pub fn add(&self, a: AddRequest) -> Result<TaskInfo> {
-        if !(a.url.starts_with("http://") || a.url.starts_with("https://")) {
-            bail!("only http:// and https:// URLs are supported");
+    pub fn add(&self, mut a: AddRequest) -> Result<TaskInfo> {
+        if !(a.url.starts_with("http://") || a.url.starts_with("https://") || zdm_core::ftp::is_ftp_url(&a.url)) {
+            bail!("only http://, https:// and ftp:// addresses are supported");
+        }
+        // credentials never stay in the visible link
+        let (clean, from_url) = split_userinfo(&a.url);
+        a.url = clean;
+        if let Some((u, p)) = a.auth.take().or(from_url) {
+            a.headers.retain(|(k, _)| !k.eq_ignore_ascii_case(AUTH_HEADER));
+            a.headers.push((AUTH_HEADER.into(), format!("{}:{}", u.replace(':', "%3A"), p)));
         }
         if let Some(f) = &a.filename {
             if f.is_empty() || f.contains(['/', '\\']) || f == "." || f == ".." {
                 bail!("filename must be a plain file name");
+            }
+        }
+        if !a.allow_duplicate {
+            let existing = self.store().tasks()?.into_iter().find(|t| t.info.url == a.url && t.info.state != State::Completed);
+            if let Some(t) = existing {
+                if a.start && matches!(t.info.state, State::Paused | State::Failed) {
+                    self.resume(t.info.id)?;
+                }
+                return self.get(t.info.id);
             }
         }
         let queue = a.queue.clone().unwrap_or_else(|| DEFAULT_QUEUE.to_string());
@@ -199,6 +339,7 @@ impl Manager {
     pub fn resume(&self, id: i64) -> Result<()> {
         match self.get(id)?.state {
             State::Paused | State::Failed => {
+                self.retries.lock().unwrap().remove(&id);
                 self.store().set_state(id, State::Queued, None)?;
                 self.wake.notify_one();
                 Ok(())
@@ -285,6 +426,7 @@ impl Manager {
                 running.insert(id, Running { gen, queue: q.name.clone(), cancel, handle });
             }
         }
+        self.check_after_all();
         Ok(())
     }
 
@@ -320,36 +462,110 @@ impl Manager {
         let still_running = self.get(id).map(|t| t.state == State::Running).unwrap_or(false);
         match outcome {
             Ok(()) => {
-                let s = self.store();
-                if still_running {
-                    let _ = s.set_state(id, State::Completed, None);
-                }
-                if let Ok(Some(t)) = s.task(id) {
-                    if let Some(size) = t.info.size {
-                        let _ = s.set_downloaded(id, size);
+                self.retries.lock().unwrap().remove(&id);
+                {
+                    let s = self.store();
+                    if still_running {
+                        let _ = s.set_state(id, State::Completed, None);
                     }
+                    if let Ok(Some(t)) = s.task(id) {
+                        if let Some(size) = t.info.size {
+                            let _ = s.set_downloaded(id, size);
+                        }
+                    }
+                }
+                if still_running {
+                    self.after.lock().unwrap().armed_with_work = true;
+                    self.run_post_command(id);
                 }
             }
             Err(e) => {
                 let cancelled = cancel.is_cancelled() || e.downcast_ref::<Cancelled>().is_some();
                 // Pause, queue-window stop and removal already recorded their own state.
                 if !cancelled && still_running {
-                    let _ = self.store().set_state(id, State::Failed, Some(&format!("{e:#}")));
+                    let msg = format!("{e:#}");
+                    let max = self.settings().auto_retries;
+                    let n = {
+                        let mut r = self.retries.lock().unwrap();
+                        let n = r.entry(id).or_insert(0);
+                        *n += 1;
+                        *n
+                    };
+                    if is_transient(&msg) && n <= max {
+                        // a network problem: try again by itself after a growing pause
+                        let delay = self.cfg.retry_delay * n;
+                        self.retry_total.fetch_add(1, Ordering::Relaxed);
+                        let _ = self.store().set_state(id, State::Failed, Some(&format!("{RETRY_PREFIX} {n} of {max}) in {}s: {msg}", delay.as_secs().max(1))));
+                        let this = self.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(delay).await;
+                            let still_waiting = this.get(id).is_ok_and(|t| t.state == State::Failed && t.error.as_deref().is_some_and(|e| e.starts_with(RETRY_PREFIX)));
+                            if still_waiting {
+                                let _ = this.store().set_state(id, State::Queued, None);
+                                this.wake.notify_one();
+                            }
+                        });
+                    } else {
+                        self.retries.lock().unwrap().remove(&id);
+                        let _ = self.store().set_state(id, State::Failed, Some(&msg));
+                    }
                 }
             }
         }
         self.wake.notify_one();
+        self.check_after_all();
+    }
+
+    /// Run the user's after-download command (virus scan, move, notify...) for a finished download.
+    /// The file name is passed in `$ZDM_FILE`, never spliced into the command text. A non-zero exit is noted
+    /// on the task (it stays completed, the file is kept).
+    fn run_post_command(self: &Arc<Self>, id: i64) {
+        let Some(cmd) = self.settings().post_command else { return };
+        let Ok(t) = self.get(id) else { return };
+        let Some(dest) = t.dest.clone() else { return };
+        let this = self.clone();
+        std::thread::spawn(move || {
+            use std::process::{Command, Stdio};
+            let note = |msg: String| {
+                let _ = this.store().set_state(id, State::Completed, Some(&msg));
+            };
+            let child = Command::new("sh").arg("-c").arg(&cmd).env("ZDM_FILE", &dest).env("ZDM_URL", &t.url).env("ZDM_TASK", id.to_string()).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+            let mut child = match child {
+                Ok(c) => c,
+                Err(e) => return note(format!("after-download command could not start: {e}")),
+            };
+            let started = std::time::Instant::now();
+            loop {
+                match child.try_wait() {
+                    Ok(Some(st)) if st.success() => return,
+                    Ok(Some(st)) => return note(format!("after-download command exited with {}", st.code().map_or("a signal".to_string(), |c| c.to_string()))),
+                    Ok(None) if started.elapsed() > Duration::from_secs(600) => {
+                        let _ = child.kill();
+                        return note("after-download command took more than 10 minutes and was stopped".into());
+                    }
+                    Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+                    Err(_) => return,
+                }
+            }
+        });
     }
 
     async fn execute(self: &Arc<Self>, id: i64, cancel: &CancellationToken) -> Result<()> {
         let row = self.store().task(id)?.ok_or_else(|| anyhow!("task {id} vanished"))?;
         let set = self.settings();
+        // stored credentials: Basic is sent at once, Digest is answered when the server asks for it
+        let mut headers = row.headers.clone();
+        let userinfo = headers.iter().position(|(k, _)| k.eq_ignore_ascii_case(AUTH_HEADER)).map(|i| headers.remove(i).1);
+        let auth = userinfo.and_then(|v| v.split_once(':').map(|(u, p)| (u.replace("%3A", ":"), p.to_string())));
         let mut opts = Options {
+            auth: auth.clone(),
+            creds: Arc::new(auth.as_ref().map_or_else(zdm_core::Credentials::default, |(u, p)| zdm_core::Credentials::new(u, p))),
             connections: set.connections as usize,
             limit_bps: if set.speed_limit_kib > 0 { Some(set.speed_limit_kib * 1024) } else { self.cfg.limit_bps },
             proxy: set.proxy.clone(),
+            shared_limit: Some(self.global.clone()),
             referer: row.referer.clone(),
-            headers: row.headers.clone(),
+            headers,
             cancel: cancel.clone(),
             ..Options::default()
         };
@@ -357,12 +573,15 @@ impl Manager {
             opts.user_agent = ua.clone();
         }
         let client = build_client(&opts)?;
+        if zdm_core::ftp::is_ftp_url(&row.info.url) {
+            return self.execute_ftp(id, &row, &opts).await;
+        }
         if zdm_core::hls::is_hls_url(&row.info.url) {
             return self.execute_hls(id, &row, &client, cancel, set.connections as usize).await;
         }
         let p = tokio::select! {
             _ = cancel.cancelled() => return Err(Cancelled.into()),
-            p = probe(&client, &row.info.url) => p?,
+            p = zdm_core::probe_with(&client, &row.info.url, &opts.creds) => p?,
         };
         let dest = match &row.info.dest {
             Some(d) => {
@@ -376,6 +595,31 @@ impl Manager {
             let _ = this.store().set_downloaded(id, done);
         })
         .await
+    }
+
+    /// An `ftp://` file: one resumable stream.
+    async fn execute_ftp(self: &Arc<Self>, id: i64, row: &crate::store::TaskRow, opts: &Options) -> Result<()> {
+        let dest = match &row.info.dest {
+            Some(d) => PathBuf::from(d),
+            None => {
+                let name = row.info.filename.clone().unwrap_or_else(|| zdm_core::ftp::file_name(&row.info.url));
+                self.choose_dest(id, &name, row.dest_dir.as_deref(), None)?
+            }
+        };
+        let this = self.clone();
+        zdm_core::ftp::download_ftp(&row.info.url, &dest, opts, move |done, total| {
+            let s = this.store();
+            let _ = s.set_downloaded(id, done);
+            if total > 0 {
+                let _ = s.set_size(id, Some(total));
+            }
+        })
+        .await?;
+        let len = std::fs::metadata(&dest)?.len();
+        let s = self.store();
+        s.set_size(id, Some(len))?;
+        s.set_downloaded(id, len)?;
+        Ok(())
     }
 
     /// A video stream (`.m3u8`): segments are fetched in parallel, joined, and remuxed to MP4 when ffmpeg exists.
@@ -410,7 +654,10 @@ impl Manager {
     /// Pick a unique destination path under the category folder and record it before downloading.
     fn choose_dest(&self, id: i64, filename: &str, dest_dir: Option<&str>, size: Option<u64>) -> Result<PathBuf> {
         let category = categorize(filename);
-        let dir = dest_dir.map(PathBuf::from).unwrap_or_else(|| PathBuf::from(self.settings().download_root).join(category));
+        let dir = dest_dir.map(PathBuf::from).unwrap_or_else(|| {
+            let set = self.settings();
+            set.category_dirs.get(category).map(PathBuf::from).unwrap_or_else(|| PathBuf::from(set.download_root).join(category))
+        });
         std::fs::create_dir_all(&dir)?;
         let store = self.store();
         let claimed = store.claimed_dests()?;
