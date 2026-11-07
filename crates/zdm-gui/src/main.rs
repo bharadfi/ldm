@@ -8,6 +8,8 @@
 #![allow(deprecated)]
 
 mod fmt;
+mod progress;
+mod segments;
 mod view;
 
 use std::cell::RefCell;
@@ -18,6 +20,7 @@ use std::time::{Duration, Instant};
 use adw::prelude::*;
 use gtk::{gio, glib};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
+use progress::ProgressWin;
 use view::Section;
 use zdm_proto::{AddRequest, Request, Response, State, TaskInfo};
 
@@ -128,6 +131,8 @@ struct Ui {
     cmd_tx: UnboundedSender<Request>,
     speeds: RefCell<HashMap<i64, (u64, Instant, f64)>>,
     queue_names: RefCell<Vec<String>>,
+    latest: RefCell<Vec<TaskInfo>>,
+    progress: Rc<RefCell<HashMap<i64, Rc<ProgressWin>>>>,
 }
 
 #[derive(Clone)]
@@ -310,7 +315,10 @@ fn build_ui(app: &adw::Application) {
         cmd_tx,
         speeds: RefCell::default(),
         queue_names: RefCell::default(),
+        latest: RefCell::default(),
+        progress: Rc::default(),
     });
+    install_menu(&ui);
     banner_hide(&ui);
 
     // sidebar selection -> filter
@@ -380,14 +388,14 @@ fn build_ui(app: &adw::Application) {
             let Some(m) = tv.model() else { return };
             let Some(it) = m.iter(path) else { return };
             let dest = m.get::<String>(&it, C_DEST as i32);
+            if m.get::<String>(&it, C_STATE as i32) != "completed" {
+                show_progress(&u, m.get::<i64>(&it, C_ID as i32));
+                return;
+            }
             if dest.is_empty() {
                 return;
             }
-            if m.get::<String>(&it, C_STATE as i32) == "completed" {
-                gtk::FileLauncher::new(Some(&gio::File::for_path(&dest))).launch(Some(&u.window), gio::Cancellable::NONE, |_| {});
-            } else {
-                open_folder(&u.window, &dest);
-            }
+            open_file(&u, &dest);
         });
     }
 
@@ -600,6 +608,19 @@ fn apply_tasks(ui: &Ui, tasks: &[TaskInfo]) {
             }
         }
     }
+    *ui.latest.borrow_mut() = tasks.to_vec();
+    let open: Vec<(i64, Rc<ProgressWin>)> = ui.progress.borrow().iter().map(|(i, w)| (*i, w.clone())).collect();
+    for (id, pw) in open {
+        match tasks.iter().find(|t| t.id == id) {
+            Some(t) => {
+                let speed = ui.speeds.borrow().get(&id).map_or(0.0, |e| e.2);
+                if pw.update(t, speed) {
+                    pw.win.close();
+                }
+            }
+            None => pw.win.close(),
+        }
+    }
     update_status(ui);
 }
 
@@ -610,4 +631,167 @@ fn update_status(ui: &Ui) {
     let total: f64 = sp.values().map(|e| e.2).sum();
     let rate = if total > 1.0 { format!(" · {}/s", fmt::bytes(total as u64)) } else { String::new() };
     ui.status.set_text(&format!("{shown} download(s) shown · {active} active{rate}"));
+}
+
+fn task_by_id(ui: &Ui, id: i64) -> Option<TaskInfo> {
+    ui.latest.borrow().iter().find(|t| t.id == id).cloned()
+}
+
+fn show_progress(ui: &Rc<Ui>, id: i64) {
+    if let Some(pw) = ui.progress.borrow().get(&id) {
+        pw.win.present();
+        return;
+    }
+    let map = ui.progress.clone();
+    let pw = ProgressWin::new(&ui.window, id, ui.cmd_tx.clone(), move || {
+        // Deferred: the map is borrowed while a window closes itself from `apply_tasks`.
+        let map = map.clone();
+        glib::idle_add_local_once(move || {
+            map.borrow_mut().remove(&id);
+        });
+    });
+    if let Some(t) = task_by_id(ui, id) {
+        let speed = ui.speeds.borrow().get(&id).map_or(0.0, |e| e.2);
+        pw.update(&t, speed);
+    }
+    ui.progress.borrow_mut().insert(id, pw.clone());
+    pw.win.present();
+}
+
+fn open_file(ui: &Ui, dest: &str) {
+    gtk::FileLauncher::new(Some(&gio::File::for_path(dest))).launch(Some(&ui.window), gio::Cancellable::NONE, |_| {});
+}
+
+fn properties_dialog(ui: &Rc<Ui>, id: i64) {
+    let Some(t) = task_by_id(ui, id) else { return };
+    let size = t.size.map(|s| format!("{} ({s} bytes)", fmt::bytes(s))).unwrap_or_else(|| "unknown".into());
+    let added = glib::DateTime::from_unix_local(t.added_at).ok().and_then(|d| d.format("%Y-%m-%d %H:%M:%S").ok()).map(|s| s.to_string()).unwrap_or_default();
+    let body = format!(
+        "Link: {}\nSaved to: {}\nCategory: {}\nQueue: {}\nStatus: {}\nSize: {}\nDownloaded: {}\nAdded: {}{}",
+        t.url,
+        t.dest.as_deref().unwrap_or("(not started yet)"),
+        t.category.as_deref().unwrap_or("Other"),
+        t.queue,
+        fmt::status_label(&t),
+        size,
+        fmt::bytes(t.downloaded),
+        added,
+        t.error.as_deref().map(|e| format!("\nError: {e}")).unwrap_or_default(),
+    );
+    let name = t.dest.as_deref().and_then(|d| std::path::Path::new(d).file_name()).map(|n| n.to_string_lossy().into_owned()).or(t.filename.clone()).unwrap_or_else(|| "Download".into());
+    let dialog = adw::AlertDialog::builder().heading(name).body(body).build();
+    dialog.add_response("copy", "Copy link");
+    dialog.add_response("close", "Close");
+    dialog.set_default_response(Some("close"));
+    dialog.set_close_response("close");
+    let u = ui.clone();
+    dialog.connect_response(None, move |_, r| {
+        if r == "copy" {
+            u.window.clipboard().set_text(&t.url);
+        }
+    });
+    dialog.present(Some(&ui.window));
+}
+
+/// Right-click menu of the download table.
+type RowAction = Box<dyn Fn(&Rc<Ui>, Vec<Picked>)>;
+
+fn install_menu(ui: &Rc<Ui>) {
+    let menu = gio::Menu::new();
+    let first = gio::Menu::new();
+    first.append(Some("Open"), Some("win.open"));
+    first.append(Some("Open folder"), Some("win.folder"));
+    first.append(Some("Show progress"), Some("win.show"));
+    let second = gio::Menu::new();
+    second.append(Some("Pause"), Some("win.pause"));
+    second.append(Some("Resume"), Some("win.resume"));
+    second.append(Some("Download again"), Some("win.again"));
+    let third = gio::Menu::new();
+    third.append(Some("Copy link"), Some("win.copy"));
+    third.append(Some("Properties"), Some("win.props"));
+    third.append(Some("Delete…"), Some("win.delete"));
+    for m in [&first, &second, &third] {
+        menu.append_section(None, m);
+    }
+
+    let mk = |name: &str, f: RowAction| {
+        let a = gio::SimpleAction::new(name, None);
+        let u = ui.clone();
+        a.connect_activate(move |_, _| {
+            let sel = selected(&u);
+            if !sel.is_empty() {
+                f(&u, sel);
+            }
+        });
+        ui.window.add_action(&a);
+    };
+    mk("open", Box::new(|u, sel| {
+        if let Some(d) = sel.iter().find(|p| p.state == State::Completed).and_then(|p| p.dest.clone()) {
+            open_file(u, &d);
+        }
+    }));
+    mk("folder", Box::new(|u, sel| {
+        if let Some(d) = sel.into_iter().find_map(|p| p.dest) {
+            open_folder(&u.window, &d);
+        }
+    }));
+    mk("show", Box::new(|u, sel| show_progress(u, sel[0].id)));
+    mk("pause", Box::new(|u, sel| {
+        for p in sel.iter().filter(|p| matches!(p.state, State::Running | State::Queued)) {
+            send(u, Request::Pause { id: p.id });
+        }
+    }));
+    mk("resume", Box::new(|u, sel| {
+        for p in sel.iter().filter(|p| matches!(p.state, State::Paused | State::Failed)) {
+            send(u, Request::Resume { id: p.id });
+        }
+    }));
+    mk("again", Box::new(|u, sel| {
+        for p in &sel {
+            if let Some(t) = task_by_id(u, p.id) {
+                send(u, Request::Add(AddRequest { url: t.url, start: true, ..Default::default() }));
+            }
+        }
+    }));
+    mk("copy", Box::new(|u, sel| {
+        let urls: Vec<String> = sel.iter().filter_map(|p| task_by_id(u, p.id)).map(|t| t.url).collect();
+        u.window.clipboard().set_text(&urls.join("\n"));
+    }));
+    mk("props", Box::new(|u, sel| properties_dialog(u, sel[0].id)));
+    mk("delete", Box::new(|u, _| delete_dialog(u)));
+
+    let click = gtk::GestureClick::builder().button(3).build();
+    let u = ui.clone();
+    click.connect_pressed(move |_, _, x, y| {
+        let table = &u.table;
+        let (bx, by) = table.convert_widget_to_bin_window_coords(x as i32, y as i32);
+        let Some((Some(path), _, _, _)) = table.path_at_pos(bx, by) else { return };
+        let sel = table.selection();
+        if !sel.path_is_selected(&path) {
+            sel.unselect_all();
+            sel.select_path(&path);
+        }
+        let picked = selected(&u);
+        let any = |f: &dyn Fn(&Picked) -> bool| picked.iter().any(f);
+        let set = |name: &str, on: bool| {
+            if let Some(a) = u.window.lookup_action(name).and_then(|a| a.downcast::<gio::SimpleAction>().ok()) {
+                a.set_enabled(on);
+            }
+        };
+        set("open", any(&|p| p.state == State::Completed && p.dest.is_some()));
+        set("folder", any(&|p| p.dest.is_some()));
+        set("show", any(&|p| p.state != State::Completed));
+        set("pause", any(&|p| matches!(p.state, State::Running | State::Queued)));
+        set("resume", any(&|p| matches!(p.state, State::Paused | State::Failed)));
+        let pop = gtk::PopoverMenu::from_model(Some(&menu));
+        pop.set_parent(table);
+        pop.set_has_arrow(false);
+        pop.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+        pop.connect_closed(|p| {
+            let p = p.clone();
+            glib::idle_add_local_once(move || p.unparent());
+        });
+        pop.popup();
+    });
+    ui.table.add_controller(click);
 }

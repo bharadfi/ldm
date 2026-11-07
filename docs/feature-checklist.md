@@ -22,9 +22,9 @@ observation only, our own icons/strings/code. `[x]` done, `[~]` partly, `[ ]` no
 ## Window (main UI)
 - [x] Toolbar, category tree, sortable table (name, queue, size, status, time left, rate, date, link), status bar
 - [x] Colourful theme, logo, desktop launcher (`packaging/install-user.sh`)
-- [ ] Per-download progress window (segment bars, speed graph, Pause/Cancel, "show when finished")
-- [ ] Right-click menu (open, open folder, copy link, properties, refresh link, move to queue, redownload)
-- [ ] Download properties dialog, "Add URL" dialog with auth/referer/category/save-as fields, batch add
+- [x] Per-download progress window (per-connection bars, rate, time left, Pause/Resume, close-when-finished); [ ] speed graph, auto-open on start
+- [x] Right-click menu (open, open folder, show progress, pause/resume, download again, copy link, properties, delete); [ ] refresh link, move to queue (needs a daemon request)
+- [~] Download properties dialog (read-only done); "Add URL" dialog with auth/referer/category/save-as fields, batch add
 - [ ] Options dialog (general, connection/proxy, save-to folders, file types, sounds, tray, language)
 - [ ] Tray icon + menu, minimise to tray, notifications on completion/error, keyboard shortcuts, search/filter box
 - [ ] Push updates from the daemon instead of polling

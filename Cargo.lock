@@ -2365,6 +2365,8 @@ dependencies = [
  "async-channel",
  "gtk4",
  "libadwaita",
+ "serde",
+ "serde_json",
  "tokio",
  "zdm-proto",
 ]
