@@ -40,6 +40,17 @@ native messaging paths) must be tested on Zorin; note unverified items in PRs.
 - Lock order: `running` then `store`; never take them the other way round.
 - Engine cancellation: `Options.cancel` (keeps partial data + sidecar); `zdm_core::Cancelled` marks it.
 
+## Browser integration (milestone 4, first cut)
+- `crates/zdm-nmhost`: native-messaging host (4-byte native-endian length + JSON). Accepts only `ping`/`add`,
+  http(s) only, forwards only `Cookie`; starts `zdmd` if it is not running (Windows: clears handle inheritance
+  on std handles first, otherwise the browser never sees the pipe close). `install`/`uninstall [--dry-run]
+  [--browser NAME] [--chrome-extension-id ID]` write manifests (Linux: per-browser NativeMessagingHosts dirs;
+  Windows: HKCU keys). Additive, idempotent, `.bak` on differing existing manifest.
+- `extension/`: MV3, `src/core.js` pure logic (tested with `node --test extension/test`), `build.py` makes
+  `dist/chrome` + `dist/firefox`. Chromium ID is pinned by the manifest `key`; the same ID is in
+  `zdm-nmhost/src/lib.rs` (a test checks they match). Firefox ID `zdm@zdm.invalid`.
+- See `extension/README.md` for install steps and security notes.
+
 ## Status
 Milestone 1 first cut done (Windows only): `zdm-core` (probe, work-stealing segment scheduler, `.part` +
 `.part.zdm` JSON resume sidecar, If-Range with strong ETag, per-segment retries) and `zdm-cli` (`zdm <url>`).
@@ -53,5 +64,9 @@ manual end-to-end run of the real `zdmd` + `zdm` against tools/rangesrv.py incl.
 Not yet: any Linux build/test (Unix socket path, systemd unit), digest auth, real proxy/socks tests, mid-stream
 5xx on long bodies, global (cross-task) rate limit, per-queue completion actions (shutdown etc.), progress
 push/subscribe (clients poll `list`), hand-off of cookies/auth from the browser, CI, GUI, extension.
+Browser extension + native host first cut: host protocol tested end-to-end on Windows (auto-start of zdmd,
+UA/cookie/referer forwarding, header allow-list, rejection of bad input); extension logic has 10 node tests.
+NOT verified: in a real browser, on Linux (the unix-only manifest-install test never ran on Windows), Firefox snap.
+Not built: HLS/video sniffing, "download all links", extension store packaging.
 Per-segment resume state is still the JSON sidecar next to each `.part` (the SQLite DB holds task-level state).
 Developed first on Windows (engine), continue on Zorin.

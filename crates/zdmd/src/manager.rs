@@ -81,6 +81,7 @@ impl Manager {
                 queue: &queue,
                 state,
                 referer: a.referer.as_deref(),
+                user_agent: a.user_agent.as_deref(),
                 headers: &a.headers,
             })?
         };
@@ -256,7 +257,7 @@ impl Manager {
 
     async fn execute(self: &Arc<Self>, id: i64, cancel: &CancellationToken) -> Result<()> {
         let row = self.store().task(id)?.ok_or_else(|| anyhow!("task {id} vanished"))?;
-        let opts = Options {
+        let mut opts = Options {
             connections: self.cfg.connections,
             limit_bps: self.cfg.limit_bps,
             referer: row.referer.clone(),
@@ -264,6 +265,9 @@ impl Manager {
             cancel: cancel.clone(),
             ..Options::default()
         };
+        if let Some(ua) = &row.user_agent {
+            opts.user_agent = ua.clone();
+        }
         let client = build_client(&opts)?;
         let p = tokio::select! {
             _ = cancel.cancelled() => return Err(Cancelled.into()),

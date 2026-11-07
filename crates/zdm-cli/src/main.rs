@@ -29,6 +29,8 @@ enum Cmd {
         queue: Option<String>,
         #[arg(long)]
         referer: Option<String>,
+        #[arg(long)]
+        user_agent: Option<String>,
         /// Extra header "Name: value" (repeatable), e.g. -H "Cookie: a=b"
         #[arg(short = 'H', long = "header")]
         headers: Vec<String>,
@@ -202,8 +204,9 @@ async fn get(a: GetArgs) -> Result<()> {
 async fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Get(a) => get(a).await,
-        Cmd::Add { url, filename, dest_dir, queue, referer, headers, paused } => {
-            let r = call(&Request::Add(AddRequest { url, filename, dest_dir, queue, referer, headers: parse_headers(&headers)?, start: !paused })).await?;
+        Cmd::Add { url, filename, dest_dir, queue, referer, user_agent, headers, paused } => {
+            let req = AddRequest { url, filename, dest_dir, queue, referer, user_agent, headers: parse_headers(&headers)?, start: !paused };
+            let r = call(&Request::Add(req)).await?;
             if let Response::Task(t) = r {
                 print_task(&t);
             }

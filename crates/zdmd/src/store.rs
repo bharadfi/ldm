@@ -14,10 +14,12 @@ pub struct TaskRow {
     pub info: TaskInfo,
     pub dest_dir: Option<String>,
     pub referer: Option<String>,
+    pub user_agent: Option<String>,
     pub headers: Vec<(String, String)>,
 }
 
 pub struct NewTask<'a> {
+    pub user_agent: Option<&'a str>,
     pub url: &'a str,
     pub filename: Option<&'a str>,
     pub dest_dir: Option<&'a str>,
@@ -31,7 +33,7 @@ pub struct Store {
     db: Connection,
 }
 
-const TASK_COLS: &str = "id,url,filename,dest,category,queue,state,size,downloaded,error,added_at,dest_dir,referer,headers";
+const TASK_COLS: &str = "id,url,filename,dest,category,queue,state,size,downloaded,error,added_at,dest_dir,referer,headers,user_agent";
 
 fn row_to_task(r: &Row) -> rusqlite::Result<TaskRow> {
     let state: String = r.get(6)?;
@@ -52,6 +54,7 @@ fn row_to_task(r: &Row) -> rusqlite::Result<TaskRow> {
         },
         dest_dir: r.get(11)?,
         referer: r.get(12)?,
+        user_agent: r.get(14)?,
         headers: serde_json::from_str(&headers).unwrap_or_default(),
     })
 }
@@ -86,6 +89,11 @@ impl Store {
                  downloaded INTEGER NOT NULL DEFAULT 0, error TEXT, added_at INTEGER NOT NULL,
                  dest_dir TEXT, referer TEXT, headers TEXT NOT NULL DEFAULT '[]');",
         )?;
+        // Additive migration for databases created before user_agent existed.
+        let has_ua = db.prepare("SELECT 1 FROM pragma_table_info('tasks') WHERE name='user_agent'")?.exists([])?;
+        if !has_ua {
+            db.execute("ALTER TABLE tasks ADD COLUMN user_agent TEXT", [])?;
+        }
         db.execute("INSERT OR IGNORE INTO queues(name,max_parallel,days) VALUES(?,3,127)", [DEFAULT_QUEUE])?;
         let s = Self { db };
         // A previous daemon run may have died mid-download; those tasks resume from their sidecars.
@@ -95,8 +103,8 @@ impl Store {
 
     pub fn insert_task(&self, t: &NewTask) -> Result<i64> {
         self.db.execute(
-            "INSERT INTO tasks(url,filename,dest_dir,queue,state,referer,headers,added_at) VALUES(?,?,?,?,?,?,?,strftime('%s','now'))",
-            params![t.url, t.filename, t.dest_dir, t.queue, t.state.as_str(), t.referer, serde_json::to_string(t.headers)?],
+            "INSERT INTO tasks(url,filename,dest_dir,queue,state,referer,headers,user_agent,added_at) VALUES(?,?,?,?,?,?,?,?,strftime('%s','now'))",
+            params![t.url, t.filename, t.dest_dir, t.queue, t.state.as_str(), t.referer, serde_json::to_string(t.headers)?, t.user_agent],
         )?;
         Ok(self.db.last_insert_rowid())
     }

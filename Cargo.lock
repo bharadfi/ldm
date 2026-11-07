@@ -1799,6 +1799,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "zdm-nmhost"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "zdm-proto",
+]
+
+[[package]]
 name = "zdm-proto"
 version = "0.1.0"
 dependencies = [

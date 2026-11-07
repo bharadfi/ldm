@@ -98,6 +98,10 @@ pub async fn listen(m: Arc<Manager>, shutdown: CancellationToken) -> Result<()> 
 /// Windows development builds: loopback TCP with a random token as the first line of every connection.
 #[cfg(not(unix))]
 pub async fn listen(m: Arc<Manager>, shutdown: CancellationToken) -> Result<()> {
+    // Refuse to start a second daemon on the same database (it would also replace daemon.json).
+    if zdm_proto::daemon_info_path().exists() && zdm_proto::connect().await.is_ok() {
+        anyhow::bail!("zdmd is already running");
+    }
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let token: String = rand::random::<[u8; 16]>().iter().map(|b| format!("{b:02x}")).collect();
     let info = zdm_proto::DaemonInfo { addr: listener.local_addr()?.to_string(), token: token.clone() };

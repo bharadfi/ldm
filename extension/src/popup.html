@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ZDM</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <h1>ZDM Download Manager</h1>
+  <p id="status" class="status">Checking…</p>
+  <p id="grant" hidden>
+    <button id="grantBtn">Allow access to all sites</button>
+    <small>Needed to read cookies for downloads that require you to be signed in.</small>
+  </p>
+  <label class="row"><input type="checkbox" id="enabled"> Take over browser downloads</label>
+  <label class="col">Keep files smaller than (MiB) in the browser
+    <input type="number" id="minSize" min="0" step="1">
+  </label>
+  <label class="col">Sites the browser should keep handling (one per line)
+    <textarea id="excluded" rows="3" spellcheck="false"></textarea>
+  </label>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

@@ -260,7 +260,7 @@ fn interrupted_tasks_are_requeued_on_restart() {
     let db = dir.path().join("t.db");
     let id = {
         let s = Store::open(&db).unwrap();
-        let id = s.insert_task(&NewTask { url: "http://x/y", filename: None, dest_dir: None, queue: "Main", state: State::Queued, referer: None, headers: &[] }).unwrap();
+        let id = s.insert_task(&NewTask { url: "http://x/y", filename: None, dest_dir: None, queue: "Main", state: State::Queued, referer: None, user_agent: None, headers: &[] }).unwrap();
         s.set_state(id, State::Running, None).unwrap();
         id
     };
@@ -275,7 +275,7 @@ fn headers_and_queues_persist() {
     let hdrs = vec![("Cookie".to_string(), "a=b".to_string())];
     {
         let s = Store::open(&db).unwrap();
-        s.insert_task(&NewTask { url: "http://x/y", filename: Some("n.bin"), dest_dir: None, queue: "Main", state: State::Paused, referer: Some("http://ref/"), headers: &hdrs }).unwrap();
+        s.insert_task(&NewTask { url: "http://x/y", filename: Some("n.bin"), dest_dir: None, queue: "Main", state: State::Paused, referer: Some("http://ref/"), user_agent: Some("UA/1"), headers: &hdrs }).unwrap();
         s.set_queue(&QueueInfo { name: "Night".into(), max_parallel: 2, window: Some(Window { start_min: 60, end_min: 360, days: 0x7f }) }).unwrap();
     }
     let s = Store::open(&db).unwrap();

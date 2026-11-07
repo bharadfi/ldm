@@ -44,7 +44,7 @@ impl State {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
 pub struct AddRequest {
     pub url: String,
     /// Override the server-suggested file name.
@@ -54,6 +54,9 @@ pub struct AddRequest {
     /// Queue name; the default queue when absent.
     pub queue: Option<String>,
     pub referer: Option<String>,
+    /// User-Agent of the browser that started the download (cookies are often tied to it).
+    #[serde(default)]
+    pub user_agent: Option<String>,
     /// Extra request headers such as `Cookie`. Stored in the daemon database so downloads can resume.
     #[serde(default)]
     pub headers: Vec<(String, String)>,
