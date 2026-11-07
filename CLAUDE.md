@@ -77,3 +77,6 @@ Linux verification (Zorin session 1): `cargo test --workspace` (all pass, incl. 
 rangesrv.py: socket 0600, DB 0600, 8 ranged connections, pause/resume. Added `packaging/systemd/zdmd.service`
 (user unit, ExecStart `~/.cargo/bin/zdmd`; not yet enabled/tested via systemctl). This machine had no browser and no
 libgtk-4-dev/libadwaita-1-dev yet (needs sudo apt), so extension-in-browser and GUI are still pending.
+Browser takeover verified in a real browser on Linux (Zorin 18, Mozilla-deb Firefox 159, temporary add-on): a click on a
+download link was cancelled in Firefox and completed by ZDM (UA forwarded, files numbered `name (N).ext`). Chrome/Brave
+and the systemd unit are still untested. GTK dev libs (libgtk-4-dev 4.14, libadwaita 1.5) are now installed.
