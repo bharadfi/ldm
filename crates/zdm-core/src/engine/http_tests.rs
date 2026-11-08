@@ -225,3 +225,14 @@ async fn digest_works_for_servers_without_range_support_too() {
     run(&srv.url("/s.bin"), &dest, &o).await.unwrap();
     assert_file(&dest, MIB);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn too_many_requests_makes_it_use_fewer_connections_and_still_finish() {
+    let size = 12 * MIB;
+    let srv = start(Config { max_active: 2, ..cfg(size) }).await;
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("f.bin");
+    run(&srv.url("/f.bin"), &dest, &Options { connections: 8, retries: 1, ..Options::default() }).await.unwrap();
+    assert_file(&dest, size);
+    assert!(srv.requests().iter().any(|r| r.status == 429), "the strict server was never hit");
+}

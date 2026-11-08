@@ -13,6 +13,8 @@ pub struct Config {
     pub ranges: bool,
     /// Answer this many non-probe ranged requests with 503 before behaving.
     pub fail_first_ranged: usize,
+    /// Answer 429 when more than this many ranged requests are in flight (0 = no limit).
+    pub max_active: usize,
     /// Required `Authorization` header value, if any.
     pub auth: Option<String>,
     /// ETag is "v1" for the first request and "v2" afterwards (file replaced mid-download).
@@ -65,7 +67,7 @@ pub async fn start(cfg: Config) -> Server {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let log = Arc::new(Mutex::new(Vec::new()));
-    let counters = Arc::new((AtomicUsize::new(0), AtomicUsize::new(0))); // (all requests, ranged non-probe)
+    let counters = Arc::new((AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0))); // (all requests, ranged non-probe, in flight)
     let (l2, c2) = (log.clone(), counters);
     tokio::spawn(async move {
         loop {
@@ -79,7 +81,7 @@ pub async fn start(cfg: Config) -> Server {
     Server { addr, log }
 }
 
-async fn handle(mut s: TcpStream, cfg: Config, log: Arc<Mutex<Vec<Req>>>, c: Arc<(AtomicUsize, AtomicUsize)>) -> std::io::Result<()> {
+async fn handle(mut s: TcpStream, cfg: Config, log: Arc<Mutex<Vec<Req>>>, c: Arc<(AtomicUsize, AtomicUsize, AtomicUsize)>) -> std::io::Result<()> {
     let mut buf = Vec::new();
     let mut tmp = [0u8; 2048];
     while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
@@ -133,6 +135,23 @@ async fn handle(mut s: TcpStream, cfg: Config, log: Arc<Mutex<Vec<Req>>>, c: Arc
         return s.write_all(respond_empty(503, "Service Unavailable").as_bytes()).await;
     }
 
+    let counted = range.is_some() && !is_probe && cfg.max_active > 0;
+    if counted && c.2.fetch_add(1, Ordering::SeqCst) >= cfg.max_active {
+        c.2.fetch_sub(1, Ordering::SeqCst);
+        log.lock().unwrap().push(Req { range, status: 429 });
+        return s.write_all("HTTP/1.1 429 Too Many Requests\r\nRetry-After: 0\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".as_bytes()).await;
+    }
+    let result = respond_ranged(&mut s, &cfg, &log, range, &header, etag).await;
+    if counted {
+        c.2.fetch_sub(1, Ordering::SeqCst);
+    }
+    result
+}
+
+async fn respond_ranged(s: &mut TcpStream, cfg: &Config, log: &Arc<Mutex<Vec<Req>>>, range: Option<String>, header: &(dyn Fn(&str) -> Option<String> + Sync), etag: &str) -> std::io::Result<()> {
+    let respond_empty = |status: u16, reason: &'static str| {
+        format!("HTTP/1.1 {status} {reason}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+    };
     let if_range_ok = header("if-range").is_none_or(|v| v == etag);
     let (mut start, mut end, mut status) = (0u64, cfg.size.saturating_sub(1), 200u16);
     if let (Some(r), true, true) = (&range, cfg.ranges, if_range_ok) {

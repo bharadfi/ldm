@@ -262,7 +262,7 @@ pub const CATEGORY_TABLE: &[(&str, &[&str])] = &[
 pub const OTHER_CATEGORY: &str = "Other";
 
 fn default_auto_retries() -> u32 {
-    3
+    8
 }
 
 /// What to do once every running and queued download is done (one shot, armed by the user).

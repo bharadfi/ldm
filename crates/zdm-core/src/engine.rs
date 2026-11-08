@@ -134,11 +134,43 @@ pub(crate) struct Ctx {
     own: Option<Arc<Limiter>>,
     shared: Vec<Arc<Limiter>>,
     creds: Arc<crate::digest::Credentials>,
+    gate: Arc<Gate>,
+}
+
+/// How many requests of one download may run at once. Starts at the configured number of connections and shrinks
+/// (never below one) each time the server answers "too many requests", so a strict server is not hammered.
+struct Gate {
+    sem: tokio::sync::Semaphore,
+    total: std::sync::atomic::AtomicUsize,
+}
+
+impl Default for Gate {
+    fn default() -> Self {
+        Gate::new(8)
+    }
+}
+
+impl Gate {
+    fn new(n: usize) -> Gate {
+        let n = n.max(1);
+        Gate { sem: tokio::sync::Semaphore::new(n), total: std::sync::atomic::AtomicUsize::new(n) }
+    }
+
+    /// Give up one slot for good, unless it is the last one.
+    fn shrink(&self, permit: tokio::sync::SemaphorePermit<'_>) {
+        let mut cur = self.total.load(Ordering::SeqCst);
+        while cur > 1 {
+            match self.total.compare_exchange(cur, cur - 1, Ordering::SeqCst, Ordering::SeqCst) {
+                Ok(_) => return permit.forget(),
+                Err(now) => cur = now,
+            }
+        }
+    }
 }
 
 impl Ctx {
     pub(crate) fn from_opts(opts: &Options) -> Ctx {
-        Ctx { own: opts.limit_bps.map(|b| Arc::new(Limiter::new(b))), shared: opts.shared_limits.clone(), creds: opts.creds.clone() }
+        Ctx { own: opts.limit_bps.map(|b| Arc::new(Limiter::new(b))), shared: opts.shared_limits.clone(), creds: opts.creds.clone(), gate: Arc::new(Gate::new(opts.connections)) }
     }
 
     pub(crate) async fn wait(&self, n: usize) {
@@ -463,6 +495,7 @@ async fn run_segment(
     lim: &Ctx,
 ) -> Result<()> {
     let mut attempt = 0;
+    let mut limited = 0u32;
     loop {
         let (pos, end) = {
             let s = &shared.lock().unwrap().segs[idx];
@@ -483,6 +516,16 @@ async fn run_segment(
                 }
             }
             Err(FetchError::Fatal(e)) => return Err(e),
+            Err(FetchError::Limited(e, wait)) => {
+                // being told to slow down is not a failure: back off (longer each time) and keep going for a long while
+                limited += 1;
+                if limited > 30 {
+                    return Err(e.context(format!("segment {idx}: the server kept refusing requests")));
+                }
+                let backoff = Duration::from_millis((500u64 << (limited - 1).min(6)).min(30_000));
+                tokio::time::sleep(wait.unwrap_or_default().max(backoff).min(Duration::from_secs(120))).await;
+                continue;
+            }
             Err(FetchError::Retry(e)) => {
                 if attempt >= retries {
                     return Err(e.context(format!("segment {idx} failed after {retries} retries")));
@@ -496,6 +539,8 @@ async fn run_segment(
 
 enum FetchError {
     Retry(anyhow::Error),
+    /// The server is rate limiting us (429/503): wait this long (its Retry-After, if it gave one).
+    Limited(anyhow::Error, Option<Duration>),
     Fatal(anyhow::Error),
 }
 
@@ -511,6 +556,7 @@ async fn fetch_range(
     validator: Option<&str>,
     lim: &Ctx,
 ) -> std::result::Result<(), FetchError> {
+    let permit = lim.gate.sem.acquire().await.map_err(|e| FetchError::Fatal(e.into()))?;
     let mut req = lim.creds.sign(client.get(url), url).header(RANGE, format!("bytes={}-{}", pos, end - 1));
     if let Some(v) = validator {
         req = req.header(IF_RANGE, v);
@@ -530,7 +576,12 @@ async fn fetch_range(
         StatusCode::RANGE_NOT_SATISFIABLE => {
             return Err(FetchError::Fatal(anyhow::Error::new(ResumeInvalid("range not satisfiable: file changed or truncated".into()))))
         }
-        s if s.is_server_error() || s == StatusCode::TOO_MANY_REQUESTS => return Err(FetchError::Retry(anyhow!("server returned {s}"))),
+        s if s == StatusCode::TOO_MANY_REQUESTS || (s == StatusCode::SERVICE_UNAVAILABLE && resp.headers().contains_key(reqwest::header::RETRY_AFTER)) => {
+            let wait = resp.headers().get(reqwest::header::RETRY_AFTER).and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse::<u64>().ok()).map(Duration::from_secs);
+            lim.gate.shrink(permit);
+            return Err(FetchError::Limited(anyhow!("server returned {s}"), wait));
+        }
+        s if s.is_server_error() => return Err(FetchError::Retry(anyhow!("server returned {s}"))),
         s => return Err(FetchError::Fatal(anyhow!("server returned {s}"))),
     }
     let mut stream = resp.bytes_stream();
