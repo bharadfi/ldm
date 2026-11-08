@@ -102,7 +102,7 @@ fn browser_program(name: &str) -> &'static str {
         _ => {
             // Developer Edition and Nightly are the Firefox builds that accept this add-on
             let path = std::env::var_os("PATH").unwrap_or_default();
-            ["firefox-developer-edition", "firefox-nightly", "firefox-dev", "firefox"].into_iter().find(|p| std::env::split_paths(&path).any(|d| d.join(p).is_file())).unwrap_or("firefox")
+            ["firefox-devedition", "firefox-developer-edition", "firefox-nightly", "firefox-dev", "firefox"].into_iter().find(|p| std::env::split_paths(&path).any(|d| d.join(p).is_file())).unwrap_or("firefox")
         }
     }
 }
@@ -123,7 +123,7 @@ fn browser_scheme(name: &str) -> &'static str {
 /// Returns true when the line was added just now.
 fn allow_unsigned_addons(program: &str) -> bool {
     let suffix = match program {
-        "firefox-developer-edition" | "firefox-dev" => ".dev-edition-default",
+        "firefox-devedition" | "firefox-developer-edition" | "firefox-dev" => ".dev-edition-default",
         "firefox-nightly" => ".default-nightly",
         _ => return false,
     };

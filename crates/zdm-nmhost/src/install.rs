@@ -97,7 +97,7 @@ fn program_names(browser: &str) -> &'static [&'static str] {
         "brave" => &["brave-browser", "brave"],
         "brave-origin" => &["brave-origin", "brave-origin-stable"],
         "edge" => &["microsoft-edge", "microsoft-edge-stable"],
-        "firefox" => &["firefox", "firefox-developer-edition", "firefox-nightly", "firefox-dev"],
+        "firefox" => &["firefox", "firefox-devedition", "firefox-developer-edition", "firefox-nightly", "firefox-dev"],
         _ => &[],
     }
 }
