@@ -44,7 +44,11 @@ observation only, our own icons/strings/code. `[x]` done, `[~]` partly, `[ ]` no
 
 ## Packaging
 - [~] systemd user unit written (not enabled/tested); [ ] .deb with launcher, icons, unit, native-host manifests
-- [x] Search box (name or link) with Ctrl+F
+- [x] Search box (name or link) with Ctrl+F, Find Next (F3)
+- [x] Video pages (YouTube and many other sites) through yt-dlp: menu of resolutions / audio-only / subtitles with sizes, download with progress, pause, resume; "Download video from a web page…" dialog; `zdm formats`
+- [x] On-page "Download this video" button in the browser with the same menu (extension content script; verified on a test page in a real browser engine with the extension's messages faked; [ ] not yet tried in the owner's browser with the real native helper)
+- [x] Compact IDM-like layout (9 pt, slim title bar, 22 px icons), toolbar dropdowns for Start/Stop Queue, Speed limiter submenu, Arrange files, Customize list, Dark mode, Font size, Toolbar/Tray submenus, Show drop target, batch download from clipboard, Export/Import submenus
+- [ ] Options as tabs like IDM (General / File types / Save to / Downloads / Connection / Proxy / Sites logins / Sounds), per-browser on/off list, "hold a key to prevent or force downloading", saved site logins, sounds
 
 ## Known gaps (decided, not forgotten)
 - NTLM login: needs the same connection for the whole handshake, which the HTTP library's connection pool does not give; Basic and Digest work.

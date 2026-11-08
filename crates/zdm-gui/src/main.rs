@@ -11,11 +11,13 @@ mod dialogs;
 mod fmt;
 mod grabber;
 mod helpers;
+mod look;
 mod menus;
 mod prefs;
 mod progress;
 mod segments;
 mod tray;
+mod video;
 mod view;
 
 use std::cell::RefCell;
@@ -59,6 +61,8 @@ enum Event {
     Queues(Vec<QueueInfo>),
     Settings(Settings),
     Links(Vec<GrabLink>),
+    Formats(zdm_proto::FormatList),
+    FormatsFailed(String),
     AfterAll(AfterAll),
     GrabFailed(String),
     Offline(String),
@@ -99,13 +103,17 @@ fn worker(events: async_channel::Sender<Event>, mut cmds: tokio::sync::mpsc::Unb
                 _ = tick.tick() => None,
                 c = cmds.recv() => match c { Some(c) => Some(c), None => return },
             };
-            if let Some(req @ Request::Grab(_)) = req {
-                // a crawl can take a minute: run it beside the polling instead of in front of it
+            if let Some(req @ (Request::Grab(_) | Request::Formats { .. })) = req {
+                // a crawl or a video lookup can take a while: run it beside the polling instead of in front of it
                 let events = events.clone();
                 tokio::spawn(async move {
+                    let is_video = matches!(req, Request::Formats { .. });
                     let ev = match zdm_proto::call(&req).await {
                         Ok(Response::Links { links }) => Event::Links(links),
+                        Ok(Response::Formats(l)) => Event::Formats(l),
+                        Ok(_) if is_video => Event::FormatsFailed("unexpected answer from the daemon".into()),
                         Ok(_) => Event::GrabFailed("unexpected answer from the daemon".into()),
+                        Err(e) if is_video => Event::FormatsFailed(e.to_string()),
                         Err(e) => Event::GrabFailed(e.to_string()),
                     };
                     let _ = events.send(ev).await;
@@ -178,6 +186,13 @@ pub struct Ui {
     pub grab: RefCell<Option<Rc<grabber::GrabWin>>>,
     pub after_all: RefCell<AfterAll>,
     pub search_entry: gtk::SearchEntry,
+    pub sorted: gtk::TreeModelSort,
+    pub queue_start_menu: gio::Menu,
+    pub queue_stop_menu: gio::Menu,
+    pub toolbar_parts: Vec<(gtk::Image, gtk::Label)>,
+    pub font_provider: gtk::CssProvider,
+    pub video: RefCell<Option<Rc<video::VideoWin>>>,
+    pub drop_window: RefCell<Option<adw::Window>>,
     pub toolbar_box: gtk::Box,
     pub sidebar_scroll: gtk::ScrolledWindow,
     pub latest: RefCell<Vec<TaskInfo>>,
@@ -196,7 +211,7 @@ fn build_ui(app: &adw::Application) -> Rc<Ui> {
     let (cmd_tx, cmd_rx) = unbounded_channel::<Request>();
     std::thread::spawn(move || worker(ev_tx, cmd_rx));
 
-    let window = adw::ApplicationWindow::builder().application(app).title(APP_NAME).default_width(1080).default_height(600).build();
+    let window = adw::ApplicationWindow::builder().application(app).title(APP_NAME).default_width(940).default_height(560).css_classes(["ldm-window"]).build();
 
     // ---- download table ----
     let store = gtk::ListStore::new(&[
@@ -230,6 +245,10 @@ fn build_ui(app: &adw::Application) -> Rc<Ui> {
         });
     }
     let sorted = gtk::TreeModelSort::with_model(&filter);
+    let font_provider = gtk::CssProvider::new();
+    if let Some(display) = gtk::gdk::Display::default() {
+        gtk::style_context_add_provider_for_display(&display, &font_provider, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 1);
+    }
     sorted.set_sort_column_id(gtk::SortColumn::Index(C_ADDED_N), gtk::SortType::Descending);
     let table = gtk::TreeView::with_model(&sorted);
     table.add_css_class("ldm-table");
@@ -242,6 +261,7 @@ fn build_ui(app: &adw::Application) -> Rc<Ui> {
     let add_text = |title: &str, col: u32, width: i32, sort: u32, right: bool, expand: bool| {
         let cell = gtk::CellRendererText::new();
         cell.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+        cell.set_padding(4, 1);
         if right {
             cell.set_xalign(1.0);
         }
@@ -255,6 +275,7 @@ fn build_ui(app: &adw::Application) -> Rc<Ui> {
     add_text("Size", C_SIZE, 90, C_SIZE_N, true, false);
     {
         let cell = gtk::CellRendererProgress::new();
+        cell.set_padding(2, 1);
         let c = gtk::TreeViewColumn::builder().title("Status").resizable(true).sizing(gtk::TreeViewColumnSizing::Fixed).fixed_width(150).sort_column_id(C_PCT as i32).build();
         c.pack_start(&cell, true);
         c.add_attribute(&cell, "value", C_PCT as i32);
@@ -287,6 +308,8 @@ fn build_ui(app: &adw::Application) -> Rc<Ui> {
         let col = gtk::TreeViewColumn::new();
         let icon = gtk::CellRendererPixbuf::new();
         let text = gtk::CellRendererText::new();
+        icon.set_padding(2, 0);
+        text.set_padding(2, 0);
         col.pack_start(&icon, false);
         col.pack_start(&text, true);
         col.add_attribute(&icon, "icon-name", 1);
@@ -309,20 +332,25 @@ fn build_ui(app: &adw::Application) -> Rc<Ui> {
     toasts.set_child(Some(&paned));
 
     let toolbar_box = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(2).css_classes(["ldm-toolbar"]).build();
+    let toolbar_parts: Rc<RefCell<Vec<(gtk::Image, gtk::Label)>>> = Rc::default();
+    let queue_start_menu = gio::Menu::new();
+    let queue_stop_menu = gio::Menu::new();
     let make_btn = |icon: &str, label: &str, tip: &str, class: &str| {
         let b = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(2).build();
         let img = gtk::Image::from_icon_name(icon);
-        img.set_pixel_size(28);
+        img.set_pixel_size(22);
         b.append(&img);
-        b.append(&gtk::Label::new(Some(label)));
+        let lbl = gtk::Label::new(Some(label));
+        b.append(&lbl);
+        toolbar_parts.borrow_mut().push((img.clone(), lbl.clone()));
         let btn = gtk::Button::builder().child(&b).css_classes(["flat", class]).tooltip_text(tip).build();
         toolbar_box.append(&btn);
         btn
     };
     let b_add = make_btn("list-add-symbolic", "Add URL", "Add a download link", "tb-add");
     let b_resume = make_btn("media-playback-start-symbolic", "Resume", "Resume the selected downloads", "tb-resume");
-    let b_pause = make_btn("media-playback-pause-symbolic", "Pause", "Pause the selected downloads", "tb-pause");
-    let b_pause_all = make_btn("media-playback-stop-symbolic", "Pause All", "Pause every running download", "tb-pauseall");
+    let b_pause = make_btn("media-playback-pause-symbolic", "Stop", "Stop (pause) the selected downloads", "tb-pause");
+    let b_pause_all = make_btn("media-playback-stop-symbolic", "Stop All", "Stop (pause) every running download", "tb-pauseall");
     toolbar_box.append(&gtk::Separator::new(gtk::Orientation::Vertical));
     let b_delete = make_btn("user-trash-symbolic", "Delete", "Remove the selected downloads", "tb-delete");
     let b_delete_done = make_btn("edit-clear-all-symbolic", "Delete Completed", "Remove all finished downloads from the list", "tb-done");
@@ -330,8 +358,14 @@ fn build_ui(app: &adw::Application) -> Rc<Ui> {
     let b_grab = make_btn("system-search-symbolic", "Grabber", "Find files on a web page or site", "tb-grab");
     let b_options = make_btn("preferences-system-symbolic", "Options", "Connections, proxy, folders and browser helper", "tb-options");
     let b_sched = make_btn("alarm-symbolic", "Scheduler", "Queues and time windows", "tb-sched");
+    let arrow = |menu: &gio::Menu, tip: &str| {
+        let b = gtk::MenuButton::builder().icon_name("pan-down-symbolic").menu_model(menu).tooltip_text(tip).css_classes(["flat", "ldm-arrow"]).valign(gtk::Align::Center).build();
+        toolbar_box.append(&b);
+    };
     let b_qstart = make_btn("media-seek-forward-symbolic", "Start Queue", "Resume every download of the selected queue", "tb-qstart");
+    arrow(&queue_start_menu, "Start a particular queue");
     let b_qstop = make_btn("media-record-symbolic", "Stop Queue", "Pause every download of the selected queue", "tb-qstop");
+    arrow(&queue_stop_menu, "Stop a particular queue");
     toolbar_box.append(&gtk::Separator::new(gtk::Orientation::Vertical));
     let b_folder = make_btn("folder-open-symbolic", "Open Folder", "Show the selected file in its folder", "tb-folder");
     toolbar_box.append(&gtk::Box::builder().hexpand(true).build());
@@ -388,6 +422,13 @@ fn build_ui(app: &adw::Application) -> Rc<Ui> {
         grab: RefCell::default(),
         after_all: RefCell::default(),
         search_entry: search_entry.clone(),
+        sorted: sorted.clone(),
+        queue_start_menu: queue_start_menu.clone(),
+        queue_stop_menu: queue_stop_menu.clone(),
+        toolbar_parts: toolbar_parts.borrow().clone(),
+        font_provider: font_provider.clone(),
+        video: RefCell::default(),
+        drop_window: RefCell::default(),
         toolbar_box: toolbar_box.clone(),
         sidebar_scroll: sidebar_scroll.clone(),
         latest: RefCell::default(),
@@ -405,6 +446,7 @@ fn build_ui(app: &adw::Application) -> Rc<Ui> {
         });
     }
     menus::install(&ui, app, &menubar_slot);
+    look::apply(&ui);
     for (btn, action) in [(&b_grab, "win.grabber"), (&b_options, "win.options"), (&b_sched, "win.scheduler"), (&b_qstart, "win.queue-start"), (&b_qstop, "win.queue-stop")] {
         let w = window.clone();
         let action = action.to_string();
@@ -518,13 +560,18 @@ fn build_ui(app: &adw::Application) -> Rc<Ui> {
                         *ui.queue_infos.borrow_mut() = infos;
                         apply_queues(&ui, names);
                     }
-                    Event::Settings(s) => *ui.settings.borrow_mut() = Some(s),
+                    Event::Settings(s) => {
+                        menus::sync_speed_limit(&ui, s.global_limit_kib);
+                        *ui.settings.borrow_mut() = Some(s);
+                    }
                     Event::AfterAll(a) => {
                         if *ui.after_all.borrow() != a {
                             menus::sync_after_all(&ui, &a);
                         }
                     }
                     Event::Links(l) => grabber::show_results(&ui, l),
+                    Event::Formats(l) => video::show_results(&ui, l),
+                    Event::FormatsFailed(m) => video::show_error(&ui, &m),
                     Event::GrabFailed(m) => grabber::show_error(&ui, &m),
                     Event::Offline(msg) => {
                         ui.banner.set_title(&format!("Starting the download service… ({msg})"));
@@ -658,6 +705,14 @@ fn apply_queues(ui: &Ui, names: Vec<String>) {
     for n in &names {
         let it = ui.sidebar_store.append(Some(&ui.queues_parent));
         ui.sidebar_store.set(&it, &[(0, n), (1, &"media-playlist-consecutive"), (2, &format!("q:{n}"))]);
+    }
+    for (menu, action) in [(&ui.queue_start_menu, "win.queue-start-named"), (&ui.queue_stop_menu, "win.queue-stop-named")] {
+        menu.remove_all();
+        for n in &names {
+            let item = gio::MenuItem::new(Some(n), None);
+            item.set_action_and_target_value(Some(action), Some(&n.to_variant()));
+            menu.append_item(&item);
+        }
     }
     ui.sidebar.expand_all();
     if let Section::Queue(q) = &*ui.section.borrow() {
@@ -983,6 +1038,36 @@ fn selftest(ui: &Rc<Ui>, base: String) {
             }
         }));
     }
+    // View menu switches really change the window (and are put back afterwards)
+    at(12, Box::new(|u| {
+        let act = |name: &str, param: Option<&str>| {
+            let v = param.map(|p| p.to_variant());
+            let _ = gtk::prelude::WidgetExt::activate_action(&u.window, name, v.as_ref());
+        };
+        act("win.dark-mode", None);
+        let dark = u.window.has_css_class("ldm-dark") && u.prefs.borrow().dark_mode;
+        act("win.dark-mode", None);
+        let light = !u.window.has_css_class("ldm-dark");
+        act("win.toolbar-labels", None);
+        let labels_off = u.toolbar_parts.iter().all(|(_, l)| !l.is_visible());
+        act("win.toolbar-labels", None);
+        act("win.font", Some("11"));
+        let big = u.prefs.borrow().font_pt == 11;
+        act("win.font", Some("9"));
+        look::change(u, |p| p.hidden_columns = vec!["Link".into(), "Queue".into()]);
+        let hidden = u.table.columns().iter().filter(|c| !c.is_visible()).count();
+        look::change(u, |p| p.hidden_columns.clear());
+        act("win.arrange", Some("size"));
+        for name in ["win.video-page", "win.columns", "win.drop-target", "win.find-next", "win.batch-clipboard"] {
+            act(name, None);
+        }
+        act("win.speed-limit", Some("custom"));
+        let ok = dark && light && labels_off && big && hidden == 2;
+        eprintln!("SELFTEST view switches: dark {dark} light-again {light} labels-off {labels_off} big-font {big} hidden-columns {hidden}");
+        if !ok {
+            std::process::exit(7);
+        }
+    }));
     // the search box narrows the table to rows whose name or link contains the text
     at(9, Box::new(|u| u.search_entry.set_text("vslow")));
     at(10, Box::new(|u| {

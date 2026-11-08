@@ -106,4 +106,11 @@ Gap pass: `SetUrl` (refresh link; engine keeps a sidecar when size+validators ma
 (`grab::matches_pattern`), `dash.rs` (ffmpeg subprocess, kill on cancel), GUI search/speed graph/refresh dialog. Careful: `choose_dest` holds the store lock; never
 call anything that locks the store from inside it (a deadlock was found that way). `tests/dash.rs` is its own binary because manager.rs sets `ZDM_FFMPEG=none`.
 Never run `pkill -f`/`pgrep -f` with a pattern that also appears in your own command line (it kills the shell).
+Video pages: `zdmd/src/ytdlp.rs` (curate = long yt-dlp format list -> short menu; download into `<dest>.ytdlp/` with `-o out.%(ext)s`, picks the biggest `out.*`),
+`Request::Formats`, `AddRequest.ytdlp` (+`filename`), stored as private header `x-zdm-ytdlp`. yt-dlp is found via `ZDM_YTDLP`, PATH, `~/.local/bin`; tests use a fake script
+(`tests/ytdlp.rs`, own binary) and the fixture `tests/fixtures/ytdlp-formats.json`. Real check used the CC-BY sample film "Big Buck Bunny" (formats list + a 144p + audio download).
+Extension: `src/content.js` is a plain script; `build.py` prepends core.js (without `export`) -> `dist/*/content.js`. nmhost accepts `formats` and `add` with `filename`/`format`.
+Visual check recipe: `gtk4-broadwayd :5`, run the GUI with `GDK_BACKEND=broadway BROADWAY_DISPLAY=:5 LDM_NO_TRAY=1`, open http://127.0.0.1:8085/ in the built-in browser
+(resize the viewport to 1280x720; click coordinates are in the scaled screenshot frame but menus are unreliable to click there, use `zoom` for detail).
+Window look: `look.rs` (dark mode, font, toolbar, columns; prefs in `gui.json`), compact CSS block at the end of `style.css`. Self-test sets `XDG_CONFIG_HOME` to keep prefs out of the real config.
 

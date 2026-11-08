@@ -169,7 +169,7 @@ pub fn options_dialog(ui: &Rc<Ui>) {
             send(&u, Request::SetSettings(s));
             toast(&u, "Options saved. They apply to downloads started from now on.");
         }
-        let gp = GuiPrefs { auto_progress: auto.is_active(), close_to_tray: to_tray.is_active(), notifications: notes.is_active(), monitor_clipboard: clip.is_active() };
+        let gp = GuiPrefs { auto_progress: auto.is_active(), close_to_tray: to_tray.is_active(), notifications: notes.is_active(), monitor_clipboard: clip.is_active(), ..u.prefs.borrow().clone() };
         if autostart.is_active() != autostart0 {
             if let Err(e) = prefs::set_autostart(autostart.is_active()) {
                 toast(&u, &format!("Could not change the autostart entry: {e}"));
@@ -510,4 +510,74 @@ pub fn refresh_dialog(ui: &Rc<Ui>) {
         }
     });
     dialog.present(Some(&ui.window));
+}
+
+/// "Speed limiter > Other…": a limit for all downloads together.
+pub fn speed_dialog(ui: &Rc<Ui>) {
+    let Some(cur) = ui.settings.borrow().clone() else {
+        toast(ui, "Not connected to the download service yet.");
+        return;
+    };
+    let entry = gtk::Entry::builder().text(cur.global_limit_kib.to_string()).input_purpose(gtk::InputPurpose::Digits).activates_default(true).build();
+    let dialog = adw::AlertDialog::builder().heading("Speed limiter").body("Limit for all downloads together, in KiB per second. 0 means no limit.").extra_child(&entry).build();
+    dialog.add_response("cancel", "Cancel");
+    dialog.add_response("ok", "OK");
+    dialog.set_response_appearance("ok", adw::ResponseAppearance::Suggested);
+    dialog.set_default_response(Some("ok"));
+    dialog.set_close_response("cancel");
+    let u = ui.clone();
+    dialog.connect_response(None, move |_, r| {
+        match (r, entry.text().trim().parse::<u64>()) {
+            ("ok", Ok(kib)) => {
+                let mut s = cur.clone();
+                s.global_limit_kib = kib;
+                crate::menus::sync_speed_limit(&u, kib);
+                send(&u, Request::SetSettings(s));
+            }
+            ("ok", Err(_)) => toast(&u, "Type a whole number of KiB per second."),
+            _ => crate::menus::sync_speed_limit(&u, cur.global_limit_kib), // put the radio button back
+        }
+    });
+    dialog.present(Some(&ui.window));
+}
+
+/// A small window to drop links on (from a browser address bar or a page).
+pub fn show_drop_target(ui: &Rc<Ui>) {
+    if ui.drop_window.borrow().is_some() {
+        return;
+    }
+    let logo = gtk::Image::from_paintable(gtk::gdk::Texture::from_bytes(&glib::Bytes::from_static(crate::LOGO_64)).ok().as_ref());
+    logo.set_pixel_size(48);
+    let label = gtk::Label::builder().label("Drop links here").css_classes(["dim-label"]).build();
+    let content = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).margin_top(12).margin_bottom(12).margin_start(14).margin_end(14).build();
+    content.append(&logo);
+    content.append(&label);
+    let header = adw::HeaderBar::new();
+    header.add_css_class("ldm-header");
+    let tv = adw::ToolbarView::new();
+    tv.add_top_bar(&header);
+    tv.set_content(Some(&content));
+    let win = adw::Window::builder().title("Drop target").default_width(170).default_height(130).resizable(false).content(&tv).css_classes(["ldm-window"]).build();
+    let drop = gtk::DropTarget::new(String::static_type(), gtk::gdk::DragAction::COPY);
+    let u = ui.clone();
+    drop.connect_drop(move |_, value, _, _| {
+        let Ok(text) = value.get::<String>() else { return false };
+        let urls = parse_urls(&text);
+        if urls.is_empty() {
+            return false;
+        }
+        add_urls(&u, &urls);
+        true
+    });
+    win.add_controller(drop);
+    let u = ui.clone();
+    win.connect_close_request(move |_| {
+        *u.drop_window.borrow_mut() = None;
+        if let Some(a) = u.window.lookup_action("drop-target").and_then(|x| x.downcast::<gio::SimpleAction>().ok()) {
+            a.set_state(&false.to_variant());
+        }
+        glib::Propagation::Proceed
+    });
+    *ui.drop_window.borrow_mut() = Some(win.clone());
+    win.present();
 }

@@ -23,11 +23,30 @@ pub struct GuiPrefs {
     /// Offer to download a link when one is copied (off by default).
     #[serde(default)]
     pub monitor_clipboard: bool,
+    /// Dark colours instead of the bright classic look.
+    #[serde(default)]
+    pub dark_mode: bool,
+    /// Interface font size in points (8, 9 or 11).
+    #[serde(default = "nine")]
+    pub font_pt: u32,
+    /// Text under the toolbar icons.
+    #[serde(default = "yes")]
+    pub toolbar_labels: bool,
+    /// 16 px instead of 22 px toolbar icons.
+    #[serde(default)]
+    pub toolbar_small: bool,
+    /// Titles of the table columns the user switched off.
+    #[serde(default)]
+    pub hidden_columns: Vec<String>,
+}
+
+fn nine() -> u32 {
+    9
 }
 
 impl Default for GuiPrefs {
     fn default() -> Self {
-        GuiPrefs { auto_progress: true, close_to_tray: true, notifications: true, monitor_clipboard: false }
+        GuiPrefs { auto_progress: true, close_to_tray: true, notifications: true, monitor_clipboard: false, dark_mode: false, font_pt: 9, toolbar_labels: true, toolbar_small: false, hidden_columns: vec![] }
     }
 }
 
@@ -85,6 +104,7 @@ mod tests {
         assert!(!serde_json::from_str::<GuiPrefs>(r#"{"auto_progress":false}"#).unwrap().auto_progress);
         let p = serde_json::from_str::<GuiPrefs>(r#"{"auto_progress":false}"#).unwrap();
         assert!(p.close_to_tray && p.notifications && !p.monitor_clipboard);
+        assert!(!p.dark_mode && p.font_pt == 9 && p.toolbar_labels && !p.toolbar_small && p.hidden_columns.is_empty());
     }
 
     #[test]
