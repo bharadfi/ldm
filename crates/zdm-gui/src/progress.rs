@@ -124,7 +124,7 @@ impl ProgressWin {
         let area_caption = gtk::Label::builder().label("Progress by connection").xalign(0.0).css_classes(["dim-label", "caption"]).build();
 
         let toggle = gtk::Button::builder().label("Pause").build();
-        let hide = gtk::Button::builder().label("Hide").build();
+        let hide = gtk::Button::builder().label("Close").build();
         let close_when_done = gtk::CheckButton::builder().label("Close this window when finished").hexpand(true).build();
         let buttons = gtk::Box::builder().spacing(8).build();
         buttons.append(&close_when_done);

@@ -393,6 +393,16 @@ pub struct YtdlpJob<'a> {
 /// Fetch one menu choice into `dest`. Partial files are kept in `<dest>.ytdlp/` so a paused download resumes.
 /// `on_progress(done, estimated_total)` counts all streams together. Returns the finished file.
 pub async fn download(job: YtdlpJob<'_>, on_progress: impl Fn(u64, u64) + Send + Sync + 'static) -> Result<PathBuf> {
+    let on_progress: std::sync::Arc<dyn Fn(u64, u64) + Send + Sync> = std::sync::Arc::new(on_progress);
+    let had_cookies = job.cookie_browser.is_some() || job.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("cookie"));
+    match download_once(&job, on_progress.clone(), true).await {
+        // Signed-in requests sometimes see no usable formats where an anonymous one does: retry once without cookies.
+        Err(e) if had_cookies && format!("{e:#}").contains("Requested format is not available") => download_once(&job, on_progress, false).await.map_err(|_| e),
+        other => other,
+    }
+}
+
+async fn download_once(job: &YtdlpJob<'_>, on_progress: std::sync::Arc<dyn Fn(u64, u64) + Send + Sync>, use_cookies: bool) -> Result<PathBuf> {
     let exe = need_ytdlp()?;
     if !valid_selector(job.selector) {
         bail!("unsupported format selection");
@@ -423,8 +433,8 @@ pub async fn download(job: YtdlpJob<'_>, on_progress: impl Fn(u64, u64) + Send +
     }
     // the browser's Cookie header becomes a private cookie file (yt-dlp keeps its own cookie jar; a plain header is
     // ignored by some sites); other headers are passed as they are
-    let cookie = job.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("cookie")).map(|(_, v)| v.as_str());
-    let _cookie_guard = cookie_args(&mut cmd, job.page_url, cookie, job.cookie_browser);
+    let cookie = job.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("cookie")).map(|(_, v)| v.as_str()).filter(|_| use_cookies);
+    let _cookie_guard = cookie_args(&mut cmd, job.page_url, cookie, job.cookie_browser.filter(|_| use_cookies));
     for (k, v) in job.headers.iter().filter(|(k, _)| !k.eq_ignore_ascii_case("cookie")) {
         cmd.args(["--add-headers", &format!("{k}:{v}")]);
     }

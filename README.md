@@ -62,10 +62,10 @@ Download managers such as Internet Download Manager and Ant Download Manager are
 
 ### Option 1: the `.deb` package (recommended)
 
-Download `linux-download-manager_0.1.2_amd64.deb` from the [Releases page](../../releases), then:
+Download `linux-download-manager_0.1.3_amd64.deb` from the [Releases page](../../releases), then:
 
 ```bash
-sudo apt install ./linux-download-manager_0.1.2_amd64.deb
+sudo apt install ./linux-download-manager_0.1.3_amd64.deb
 ```
 
 Optional but recommended (video sites and streams):
