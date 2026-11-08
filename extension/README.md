@@ -40,6 +40,11 @@ The popup shows whether the extension can reach the daemon. If the daemon is not
 - **Video sniffer**: streams (`.m3u8`/HLS, MP4, WebM, audio) that a page loads are counted on the toolbar icon and listed in the
   popup with a *Download* button (HLS is downloaded segment by segment and converted to MP4 when ffmpeg is installed).
   DASH (`.mpd`) is downloaded through ffmpeg (needs `ffmpeg` installed; no partial resume). The list starts over when the tab navigates to another address.
+- **On-page button**: a small *Download this video* (or audio) button appears in the corner of a player when you move the mouse
+  over it or press play. Its menu lists what you can get: the page's own files, HLS resolutions from the stream's playlist, and
+  — through the app's yt-dlp support (YouTube and many other sites) — one row per resolution (MP4 1080p HD, 720p ...), audio-only
+  tracks (M4A, Opus, MP3) and subtitles, each with its size. Needs `yt-dlp` (and `ffmpeg` to join video and audio) on the computer.
+  The × hides the button on that player until the page is reloaded.
 - **Download links from this page…** (popup button or right-click on the page): lists every file link of the page, filter by type
   or text, tick, send to ZDM.
 - Popup settings: on/off, "keep small files in the browser" threshold, sites the browser should keep handling.

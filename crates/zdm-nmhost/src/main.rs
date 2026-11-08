@@ -73,11 +73,13 @@ async fn handle(payload: &[u8]) -> Value {
     let req = match parse_message(&v) {
         Ok(Msg::Ping) => Request::Ping,
         Ok(Msg::Add(a)) => Request::Add(a),
+        Ok(Msg::Formats { url }) => Request::Formats { url },
         Err(e) => return err(e),
     };
     match send(req).await {
         Ok(Response::Task(t)) => ok(json!({ "id": t.id, "state": t.state })),
         Ok(Response::Pong { version }) => ok(json!({ "version": version })),
+        Ok(Response::Formats(list)) => ok(json!({ "title": list.title, "duration": list.duration, "options": list.options })),
         Ok(Response::Error { message }) => err(message),
         Ok(_) => err("unexpected response from zdmd"),
         Err(e) => err(format!("{e:#}")),

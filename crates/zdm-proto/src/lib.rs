@@ -192,6 +192,12 @@ pub struct FormatList {
     pub options: Vec<FormatOption>,
 }
 
+/// A yt-dlp format choice (`FormatOption::id`) is handed to the program as one argument; accept only the characters
+/// format selectors and our own `x:` / `sub:` forms use, and nothing that looks like an option.
+pub fn valid_ytdlp_selector(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 200 && s.chars().all(|c| c.is_ascii_alphanumeric() || "+-_.[]=/,<>:!*()".contains(c)) && !s.starts_with('-')
+}
+
 /// Daemon-wide settings, editable from the Options dialog and saved by the daemon.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Settings {
@@ -435,6 +441,12 @@ mod tests {
     fn window_all_day() {
         let w = Window { start_min: 0, end_min: 0, days: 0x7f };
         assert!(w.active_at(1234, 3));
+    }
+
+    #[test]
+    fn selector_rule() {
+        assert!(valid_ytdlp_selector("299+140") && valid_ytdlp_selector("bestvideo[height<=720]+bestaudio/best") && valid_ytdlp_selector("sub-auto:en"));
+        assert!(!valid_ytdlp_selector("") && !valid_ytdlp_selector("--exec") && !valid_ytdlp_selector("a b") && !valid_ytdlp_selector("a;b") && !valid_ytdlp_selector(&"x".repeat(201)));
     }
 
     #[test]

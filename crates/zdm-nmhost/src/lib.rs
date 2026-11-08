@@ -47,6 +47,8 @@ pub fn write_frame(w: &mut impl Write, payload: &[u8]) -> io::Result<()> {
 pub enum Msg {
     Ping,
     Add(AddRequest),
+    /// What a video page offers (answered by yt-dlp through the daemon).
+    Formats { url: String },
 }
 
 const MAX_URL: usize = 8192;
@@ -66,6 +68,13 @@ fn opt_str(v: &Value, key: &str, max: usize) -> Result<Option<String>, String> {
 pub fn parse_message(v: &Value) -> Result<Msg, String> {
     match v.get("type").and_then(Value::as_str) {
         Some("ping") => Ok(Msg::Ping),
+        Some("formats") => {
+            let url = opt_str(v, "url", MAX_URL)?.ok_or("url is required")?;
+            if !(url.starts_with("http://") || url.starts_with("https://")) {
+                return Err("only http:// and https:// pages can be looked up".into());
+            }
+            Ok(Msg::Formats { url })
+        }
         Some("add") => {
             let url = opt_str(v, "url", MAX_URL)?.ok_or("url is required")?;
             if !(url.starts_with("http://") || url.starts_with("https://")) {
@@ -89,7 +98,14 @@ pub fn parse_message(v: &Value) -> Result<Msg, String> {
                     headers.push((k.to_string(), val.to_string()));
                 }
             }
+            let filename = opt_str(v, "filename", 200)?.filter(|f| !f.contains(['/', '\\', '\0']) && f != "." && f != "..");
+            let ytdlp = opt_str(v, "format", 200)?;
+            if ytdlp.as_deref().is_some_and(|s| !zdm_proto::valid_ytdlp_selector(s)) {
+                return Err("unsupported format selection".into());
+            }
             Ok(Msg::Add(AddRequest {
+                filename,
+                ytdlp,
                 url,
                 referer: opt_str(v, "referer", MAX_URL)?.filter(|r| r.starts_with("http://") || r.starts_with("https://")),
                 user_agent: opt_str(v, "user_agent", 1024)?.filter(|u| !u.contains(['\r', '\n'])),
@@ -167,5 +183,18 @@ mod tests {
     fn non_http_referer_is_dropped() {
         let Msg::Add(a) = parse_message(&json!({"type":"add","url":"http://h/","referer":"javascript:alert(1)"})).unwrap() else { panic!() };
         assert!(a.referer.is_none());
+    }
+
+    #[test]
+    fn video_page_messages() {
+        assert_eq!(parse_message(&json!({"type": "formats", "url": "https://v.test/watch?v=1"})).unwrap(), Msg::Formats { url: "https://v.test/watch?v=1".into() });
+        assert!(parse_message(&json!({"type": "formats", "url": "file:///etc/passwd"})).is_err());
+        assert!(parse_message(&json!({"type": "formats"})).is_err());
+        let Msg::Add(a) = parse_message(&json!({"type": "add", "url": "https://v.test/watch?v=1", "format": "299+140", "filename": "Clip [1080p].mp4"})).unwrap() else { panic!() };
+        assert_eq!((a.ytdlp.as_deref(), a.filename.as_deref()), (Some("299+140"), Some("Clip [1080p].mp4")));
+        // an option-looking selector is refused, a path-looking name is dropped
+        assert!(parse_message(&json!({"type": "add", "url": "https://v.test/x", "format": "--exec rm"})).is_err());
+        let Msg::Add(a) = parse_message(&json!({"type": "add", "url": "https://v.test/x", "filename": "../../etc/passwd"})).unwrap() else { panic!() };
+        assert_eq!(a.filename, None);
     }
 }

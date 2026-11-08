@@ -159,3 +159,90 @@ test('built manifests list the permissions and files the new features need', () 
   const src = readFileSync(new URL('../build.py', import.meta.url), 'utf8');
   for (const needle of ['"webRequest"', '"scripting"', '"links.html"', '"links.js"', '"host.js"']) assert.ok(src.includes(needle), needle);
 });
+
+import { isStreamChunk, shouldOfferButton, humanSize, parseHlsVariants, menuRows } from '../src/core.js';
+
+test('player chunks are not offered as files, real files still are', () => {
+  assert.equal(isStreamChunk('https://rr1---sn.googlevideo.com/videoplayback?expire=1&mime=video%2Fmp4'), true);
+  assert.equal(isStreamChunk('https://cdn.test/v.mp4?range=0-999999'), true);
+  assert.equal(isStreamChunk('https://cdn.test/v.mp4?bytestart=1000'), true);
+  assert.equal(isStreamChunk('https://cdn.test/v.mp4'), false);
+  assert.equal(classifyMedia({ url: 'https://rr1.googlevideo.com/videoplayback?x=1', contentType: 'video/mp4', size: 9_000_000 }), null);
+  assert.equal(classifyMedia({ url: 'https://cdn.test/movie.mp4', size: 9_000_000 }), 'video');
+});
+
+test('which players get a button', () => {
+  assert.equal(shouldOfferButton({ tag: 'video', width: 640, height: 360 }), true);
+  assert.equal(shouldOfferButton({ tag: 'video', width: 100, height: 60 }), false, 'tiny preview or ad pixel');
+  assert.equal(shouldOfferButton({ tag: 'video', width: 640, height: 360, hidden: true }), false);
+  assert.equal(shouldOfferButton({ tag: 'audio', width: 300, height: 40, controls: true }), true);
+  assert.equal(shouldOfferButton({ tag: 'audio', width: 0, height: 0, controls: false }), false, 'background audio without a player');
+  assert.equal(shouldOfferButton({ tag: 'img', width: 900, height: 900 }), false);
+});
+
+test('sizes read like the download list', () => {
+  assert.equal(humanSize(0), '');
+  assert.equal(humanSize(-1), '');
+  assert.equal(humanSize(512), '512 B');
+  assert.equal(humanSize(21_000_000), '21.0 MB');
+  assert.equal(humanSize(267_890_000), '268 MB');
+  assert.equal(humanSize(1_372_500_000), '1.4 GB');
+});
+
+test('HLS master playlists list their resolutions, best first', () => {
+  const m = '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360\nlow/p.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=2800000,RESOLUTION=1280x720,CODECS="a,b"\n/abs/high.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=64000\naudio.m3u8\n';
+  const v = parseHlsVariants(m, 'https://v.test/show/master.m3u8');
+  assert.deepEqual(v.map((x) => x.label), ['HLS stream, quality 720p', 'HLS stream, quality 360p', 'HLS stream, 64 kbps']);
+  assert.equal(v[0].url, 'https://v.test/abs/high.m3u8');
+  assert.equal(v[1].url, 'https://v.test/show/low/p.m3u8');
+  assert.deepEqual(parseHlsVariants('#EXTM3U\n#EXTINF:4,\nseg0.ts\n#EXT-X-ENDLIST\n', 'https://v.test/a.m3u8'), [], 'a media playlist is not a master');
+  assert.deepEqual(parseHlsVariants('<html>not a playlist</html>', 'https://v.test/'), []);
+});
+
+test('menu rows: yt-dlp choices first by group, then what the page loaded, without duplicates', () => {
+  const formats = [
+    { id: '299+140', kind: 'video', label: 'MP4 file, quality 1080p HD', size: 268_000_000, filename: 'T [1080p].mp4' },
+    { id: '140', kind: 'audio', label: 'M4A audio only, 129 kbps', size: 10_300_000, filename: 'T [audio].m4a' },
+    { id: 'sub:en', kind: 'subtitle', label: 'SRT subtitles, en', filename: 'T [en].srt' },
+  ];
+  const sniffed = [
+    { url: 'https://cdn.test/a.m3u8', kind: 'hls', label: 'HLS stream, quality 720p' },
+    { url: 'https://cdn.test/a.m3u8', kind: 'hls', label: 'duplicate' },
+    { url: 'https://cdn.test/clip.mp4', kind: 'video', size: 5_000_000 },
+    { url: 'https://cdn.test/song.mp3', kind: 'audio' },
+    { url: 'https://cdn.test/m.mpd', kind: 'dash' },
+  ];
+  const rows = menuRows({ sniffed, formats });
+  assert.deepEqual(rows.map((r) => r.group), ['Video', 'Audio only', 'Subtitles', 'Found on this page', 'Found on this page', 'Found on this page', 'Found on this page']);
+  assert.deepEqual(rows[0], { group: 'Video', text: 'MP4 file, quality 1080p HD', size: '268 MB', action: { type: 'ytdlp', id: '299+140', filename: 'T [1080p].mp4' } });
+  assert.deepEqual(rows.slice(3).map((r) => r.text), ['HLS stream, quality 720p', 'MP4 file', 'MP3 audio file', 'DASH stream, best quality']);
+  assert.equal(rows[4].size, '5.0 MB');
+  assert.deepEqual(rows[3].action, { type: 'url', url: 'https://cdn.test/a.m3u8' });
+  assert.deepEqual(menuRows({}), []);
+});
+
+test('the add message carries a chosen yt-dlp format and file name', () => {
+  assert.deepEqual(buildAddMessage({ url: 'https://v.test/watch?v=1', format: '299+140', filename: 'T [1080p].mp4', referer: 'https://v.test/', cookie: 'a=b', userAgent: 'UA' }), {
+    type: 'add', url: 'https://v.test/watch?v=1', filename: 'T [1080p].mp4', format: '299+140', referer: 'https://v.test/', user_agent: 'UA', headers: [['Cookie', 'a=b']],
+  });
+  assert.deepEqual(buildAddMessage({ url: 'https://v.test/f.zip' }), { type: 'add', url: 'https://v.test/f.zip', headers: [] });
+});
+
+import { execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+
+test('the build puts a self-contained content script in both packages', () => {
+  execFileSync('python3', [new URL('../build.py', import.meta.url).pathname], { stdio: 'pipe' });
+  for (const t of ['chrome', 'firefox']) {
+    const dir = new URL(`../dist/${t}/`, import.meta.url);
+    assert.ok(existsSync(new URL('content.js', dir)), `${t}: content.js`);
+    const code = readFileSync(new URL('content.js', dir), 'utf8');
+    assert.ok(!/^export /m.test(code), 'a content script cannot contain ES exports');
+    assert.ok(!/^import /m.test(code), 'a content script cannot import');
+    assert.doesNotThrow(() => new Function(code), 'it must at least parse');
+    assert.ok(code.includes('function shouldOfferButton') && code.includes('function menuRows'), 'core functions are bundled in');
+    const m = JSON.parse(readFileSync(new URL('manifest.json', dir), 'utf8'));
+    assert.deepEqual(m.content_scripts[0].js, ['content.js']);
+    assert.ok(m.permissions.includes('webRequest'));
+  }
+});

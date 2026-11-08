@@ -11,7 +11,7 @@ export async function sendToHost(msg) {
 }
 
 /** Queue `url` in ZDM with the page it came from and the browser's cookies for it. */
-export async function handOver({ url, referer }) {
+export async function handOver({ url, referer, filename, format }) {
   const cookies = await api.cookies.getAll({ url });
-  await sendToHost(buildAddMessage({ url, referer, cookie: cookieHeader(cookies), userAgent: navigator.userAgent }));
+  await sendToHost(buildAddMessage({ url, referer, filename, format, cookie: cookieHeader(cookies), userAgent: navigator.userAgent }));
 }

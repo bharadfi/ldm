@@ -8,6 +8,7 @@ Standard library only. Load dist/chrome via chrome://extensions ("Load unpacked"
 about:debugging ("Load Temporary Add-on", pick manifest.json).
 """
 import json
+import re
 import shutil
 import struct
 import sys
@@ -38,6 +39,7 @@ def base_manifest():
         "description": "Hands browser downloads to the ZDM download manager for segmented, resumable downloads.",
         "permissions": ["downloads", "cookies", "nativeMessaging", "storage", "contextMenus", "webRequest", "scripting"],
         "host_permissions": ["http://*/*", "https://*/*"],
+        "content_scripts": [{"matches": ["http://*/*", "https://*/*"], "js": ["content.js"], "all_frames": True, "run_at": "document_idle"}],
         "action": {"default_popup": "popup.html", "default_title": "ZDM Download Manager"},
         "icons": {"16": "icon16.png", "48": "icon48.png", "128": "icon128.png"},
     }
@@ -95,6 +97,12 @@ def icon(size):
     return png(size, pixel)
 
 
+def content_script():
+    """Content scripts cannot import modules: put core.js (without its `export`s) in front of the page script."""
+    core = re.sub(r"^export ", "", (SRC / "core.js").read_text(), flags=re.M)
+    return "(() => {\n" + core + "\n" + (SRC / "content.js").read_text() + "\n})();\n"
+
+
 def build(target):
     out = DIST / target
     if out.exists():
@@ -102,6 +110,7 @@ def build(target):
     out.mkdir(parents=True)
     for f in ("core.js", "host.js", "background.js", "popup.html", "popup.css", "popup.js", "links.html", "links.js"):
         shutil.copy(SRC / f, out / f)
+    (out / "content.js").write_text(content_script())
     for s in (16, 48, 128):
         (out / f"icon{s}.png").write_bytes(icon(s))
     (out / "manifest.json").write_text(json.dumps(manifest_for(target), indent=2) + "\n")

@@ -52,8 +52,10 @@ export function cookieHeader(cookies) {
     .join('; ');
 }
 
-export function buildAddMessage({ url, referer, cookie, userAgent }) {
+export function buildAddMessage({ url, referer, cookie, userAgent, filename, format }) {
   const msg = { type: 'add', url };
+  if (filename) msg.filename = filename;
+  if (format) msg.format = format; // a yt-dlp choice: `url` is then the video page
   if (referer) msg.referer = referer;
   if (userAgent) msg.user_agent = userAgent;
   msg.headers = cookie ? [['Cookie', cookie]] : [];
@@ -89,9 +91,19 @@ export function extOf(url) {
   }
 }
 
+/** Pieces of a player's own stream (YouTube's `videoplayback` chunks, byte-range URLs): not files to offer. */
+export function isStreamChunk(url) {
+  try {
+    const u = new URL(url);
+    return /\/videoplayback\b/.test(u.pathname) || u.searchParams.has('range') || u.searchParams.has('bytestart') || /\/range\/\d+/.test(u.pathname);
+  } catch {
+    return false;
+  }
+}
+
 /** 'hls' | 'dash' | 'video' | 'audio' for a response worth offering for download, else null. */
 export function classifyMedia({ url, contentType = '', size = -1 }) {
-  if (!isHttp(url)) return null;
+  if (!isHttp(url) || isStreamChunk(url)) return null;
   const ext = extOf(url);
   if (SEGMENT_EXT.has(ext)) return null;
   const ct = String(contentType).split(';')[0].trim().toLowerCase();
@@ -158,4 +170,74 @@ export function filterLinks(links, kinds, text = '') {
   return dedupeLinks(links)
     .map((l) => ({ ...l, kind: linkKind(l.url) }))
     .filter((l) => l.kind !== 'page' && kinds.has(l.kind) && (!q || l.url.toLowerCase().includes(q) || (l.text || '').toLowerCase().includes(q)));
+}
+
+// ---- the on-page "Download this video" button and its menu -----------------------------------------------------
+
+/** Should a player element get the button? (Big enough to be the main player, visible, audio only with controls.) */
+export function shouldOfferButton({ tag, width, height, hidden = false, controls = false }) {
+  if (hidden) return false;
+  if (tag === 'video') return width >= 160 && height >= 90;
+  if (tag === 'audio') return controls && width >= 100 && height >= 20;
+  return false;
+}
+
+export function humanSize(bytes) {
+  if (!(bytes > 0)) return '';
+  const u = ['B', 'KB', 'MB', 'GB'];
+  let v = bytes;
+  let i = 0;
+  while (v >= 1000 && i < u.length - 1) {
+    v /= 1000;
+    i++;
+  }
+  return `${v >= 100 || i === 0 ? Math.round(v) : v.toFixed(1)} ${u[i]}`;
+}
+
+/** Variants of an HLS master playlist (best first); an ordinary media playlist has none. */
+export function parseHlsVariants(text, baseUrl) {
+  const lines = String(text).split(/\r?\n/).map((l) => l.trim());
+  if (lines[0] !== '#EXTM3U') return [];
+  const out = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (!lines[i].startsWith('#EXT-X-STREAM-INF:')) continue;
+    const attrs = lines[i].slice(18);
+    const bw = Number(/(?:^|,)BANDWIDTH=(\d+)/.exec(attrs)?.[1] ?? 0);
+    const res = /RESOLUTION=(\d+)x(\d+)/.exec(attrs);
+    const next = lines.slice(i + 1).find((l) => l && !l.startsWith('#'));
+    if (!next) continue;
+    let url;
+    try {
+      url = new URL(next, baseUrl).href;
+    } catch {
+      continue;
+    }
+    const height = res ? Number(res[2]) : 0;
+    out.push({ url, bandwidth: bw, height, label: height ? `HLS stream, quality ${height}p` : `HLS stream, ${Math.round(bw / 1000)} kbps` });
+  }
+  return out.sort((a, b) => b.height - a.height || b.bandwidth - a.bandwidth);
+}
+
+const KIND_TITLE = { video: 'Video', audio: 'Audio only', subtitle: 'Subtitles', stream: 'Found on this page' };
+
+/**
+ * Rows of the menu. `formats` are the daemon's (yt-dlp) options, `sniffed` what the page loaded
+ * (progressive files, HLS variants, DASH). Each row: { group, text, size, action } where action is
+ * `{type:'ytdlp', id, filename}` or `{type:'url', url}`.
+ */
+export function menuRows({ sniffed = [], formats = [] }) {
+  const rows = [];
+  for (const kind of ['video', 'audio', 'subtitle']) {
+    for (const o of formats.filter((f) => f.kind === kind)) {
+      rows.push({ group: KIND_TITLE[kind], text: o.label, size: humanSize(o.size), action: { type: 'ytdlp', id: o.id, filename: o.filename } });
+    }
+  }
+  const seen = new Set();
+  for (const s of sniffed) {
+    if (!s.url || seen.has(s.url)) continue;
+    seen.add(s.url);
+    const text = s.label || (s.kind === 'dash' ? 'DASH stream, best quality' : s.kind === 'audio' ? `${(extOf(s.url) || 'audio').toUpperCase()} audio file` : `${(extOf(s.url) || 'video').toUpperCase()} file`);
+    rows.push({ group: KIND_TITLE.stream, text, size: humanSize(s.size), action: { type: 'url', url: s.url } });
+  }
+  return rows;
 }

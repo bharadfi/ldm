@@ -27,11 +27,7 @@ fn need_ytdlp() -> Result<PathBuf> {
     ytdlp_path().ok_or_else(|| anyhow!("video pages need yt-dlp, which is not installed (see https://github.com/yt-dlp/yt-dlp#installation)"))
 }
 
-/// A selector from the user's menu is passed to yt-dlp as a single argument; still, accept only the characters
-/// that format selectors and our own `x:` / `sub:` forms use.
-pub fn valid_selector(s: &str) -> bool {
-    !s.is_empty() && s.len() <= 200 && s.chars().all(|c| c.is_ascii_alphanumeric() || "+-_.[]=/,<>:!*()".contains(c)) && !s.starts_with('-')
-}
+pub use zdm_proto::valid_ytdlp_selector as valid_selector;
 
 fn sanitize(title: &str) -> String {
     let t: String = title.chars().map(|c| if c.is_control() || "/\\:*?\"<>|".contains(c) { ' ' } else { c }).collect();

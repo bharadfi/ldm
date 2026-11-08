@@ -1,5 +1,5 @@
-import { DEFAULTS, shouldHandle, isHttp, classifyMedia, addMedia } from './core.js';
-import { handOver } from './host.js';
+import { DEFAULTS, shouldHandle, isHttp, classifyMedia, addMedia, parseHlsVariants } from './core.js';
+import { handOver, sendToHost } from './host.js';
 
 const api = globalThis.browser ?? globalThis.chrome;
 async function settings() {
@@ -95,4 +95,56 @@ api.contextMenus.onClicked.addListener(async (info, tab) => {
   } catch (e) {
     await report(e);
   }
+});
+
+
+// ---- answers for the on-page button (content.js) ----
+
+/** What the tab has loaded: files as they are, and for HLS the list of resolutions from the master playlist. */
+async function mediaFor(tabId) {
+  const key = mediaKey(tabId);
+  const list = (await (api.storage.session ?? api.storage.local).get(key))[key] ?? [];
+  const out = [];
+  let looked = 0;
+  for (const m of list.slice().reverse()) {
+    if (m.kind === 'hls' && looked < 3) {
+      looked++;
+      try {
+        const text = await (await fetch(m.url, { credentials: 'include' })).text();
+        const variants = parseHlsVariants(text.slice(0, 200_000), m.url);
+        if (variants.length) {
+          out.push(...variants.map((v) => ({ url: v.url, kind: 'hls', label: v.label, size: -1 })));
+          continue;
+        }
+      } catch {}
+    }
+    out.push({ url: m.url, kind: m.kind, size: m.size });
+  }
+  return out;
+}
+
+api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  (async () => {
+    const tab = sender.tab;
+    if (!tab) throw new Error('no tab');
+    switch (msg.type) {
+      case 'media-list':
+        return { sniffed: await mediaFor(tab.id) };
+      case 'formats': {
+        const r = await sendToHost({ type: 'formats', url: tab.url });
+        return { title: r.title, options: r.options };
+      }
+      case 'download': {
+        const a = msg.action || {};
+        if (a.type === 'ytdlp') await handOver({ url: tab.url, referer: tab.url, format: a.id, filename: a.filename });
+        else if (a.type === 'url' && isHttp(a.url)) await handOver({ url: a.url, referer: tab.url });
+        else throw new Error('unknown action');
+        await report(null);
+        return { ok: true };
+      }
+      default:
+        throw new Error(`unknown message ${msg.type}`);
+    }
+  })().then(sendResponse, (e) => sendResponse({ error: String(e?.message || e) }));
+  return true; // answer asynchronously
 });
