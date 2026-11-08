@@ -106,18 +106,27 @@ fn browser_program(name: &str) -> &'static str {
 /// Extension ID that the browser shows in its extensions page (the setting pages live at chrome-extension://ID/popup.html).
 const EXT_ID: &str = zdm_nmhost::CHROME_EXTENSION_ID;
 
+/// The address scheme of the browser's own pages (`brave://extensions`).
+fn browser_scheme(name: &str) -> &'static str {
+    match name {
+        "brave" | "brave-origin" => "brave",
+        "edge" => "edge",
+        _ => "chrome",
+    }
+}
+
 fn launch_browser(name: &str, url: &str) {
     let _ = std::process::Command::new(browser_program(name)).arg(url).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
 }
 
 /// (browser, registered, found, extension state) from `zdm-nmhost status`.
-fn browser_status() -> Vec<(String, bool, bool, String)> {
+fn browser_status() -> Vec<(String, bool, bool, String, String)> {
     let Some(exe) = nmhost() else { return vec![] };
     let out = std::process::Command::new(exe).arg("status").output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
     out.lines()
         .filter_map(|l| {
             let mut it = l.split_whitespace();
-            Some((it.next()?.to_string(), it.next()? == "registered", it.next()? == "found", it.next().unwrap_or("missing").to_string()))
+            Some((it.next()?.to_string(), it.next()? == "registered", it.next()? == "found", it.next().unwrap_or("missing").to_string(), it.next().unwrap_or(EXT_ID).to_string()))
         })
         .collect()
 }
@@ -172,16 +181,28 @@ pub fn open(ui: &Rc<Ui>) {
     // ---------------- General ----------------
     let mut f = Form::new();
     f.heading("Browser and system integration");
-    f.note("Tick a browser to let it talk to this program, then press Install to add the extension. The browser asks you to confirm; if it is already open, restart it first. Firefox only accepts add-ons signed by Mozilla, so for now it needs the manual route (Open the extension folder, then about:debugging > Load Temporary Add-on).");
+    f.note("Tick a browser to let it talk to this program, then press Install: the browser opens and asks you to confirm (if it was already open, restart it first). Remove takes you to the extension's page in the browser, where you choose Remove there. Firefox only accepts add-ons signed by Mozilla, so for now it needs the manual route (Open the extension folder, then about:debugging > Load Temporary Add-on).");
     let statuses = browser_status();
     let browser_checks: Vec<(String, bool, gtk::CheckButton)> = statuses
         .iter()
-        .map(|(name, registered, found, ext)| {
+        .map(|(name, registered, found, ext, ext_id)| {
             let cb = check(&format!("Capture downloads from {} ({})", browser_title(name), if *found { "installed" } else { "not found" }), *registered);
             cb.set_hexpand(true);
-            let state = gtk::Label::builder().label(match ext.as_str() { "installed" => "Extension installed", "disabled" => "Extension turned off", _ => "Extension not installed" }).css_classes(["dim-label"]).build();
-            let install = gtk::Button::with_label(if name == "firefox" { "Open folder" } else { "Install" });
-            install.set_sensitive(*found && ext != "installed");
+            let text = if !*found {
+                "Browser not installed"
+            } else {
+                match ext.as_str() {
+                    "installed" => "Extension installed",
+                    "disabled" => "Extension turned off",
+                    _ => "Extension not installed",
+                }
+            };
+            let state = gtk::Label::builder().label(text).css_classes(["dim-label"]).build();
+            let firefox = name == "firefox";
+            let install = gtk::Button::with_label(if firefox { "Open folder" } else if ext == "installed" { "Reinstall" } else { "Install" });
+            install.set_sensitive(*found);
+            let remove = gtk::Button::with_label("Remove");
+            remove.set_sensitive(*found && ext != "missing");
             let (n, st) = (name.clone(), state.clone());
             install.connect_clicked(move |b| {
                 if n == "firefox" {
@@ -189,21 +210,32 @@ pub fn open(ui: &Rc<Ui>) {
                     if let Some(d) = dir {
                         let _ = gtk::gio::AppInfo::launch_default_for_uri(&format!("file://{}", d.display()), None::<&gtk::gio::AppLaunchContext>);
                     }
+                    launch_browser("firefox", "about:debugging#/runtime/this-firefox");
                     return;
                 }
                 let ok = nmhost().map(|e| std::process::Command::new(e).args(["ext-install", "--browser", &n]).output().is_ok_and(|o| o.status.success())).unwrap_or(false);
                 if ok {
-                    st.set_label("Restart the browser to confirm");
+                    st.set_label("Restart the browser, then confirm");
                     b.set_sensitive(false);
-                    launch_browser(&n, "about:blank");
+                    launch_browser(&n, &format!("{}://extensions", browser_scheme(&n)));
                 } else {
                     st.set_label("Could not prepare the install");
                 }
             });
-            let row = gtk::Box::builder().spacing(10).build();
+            // Removing is done in the browser itself: take the user to the extension's page there.
+            let (n, id) = (name.clone(), ext_id.clone());
+            remove.connect_clicked(move |_| {
+                if n == "firefox" {
+                    launch_browser("firefox", "about:addons");
+                } else {
+                    launch_browser(&n, &format!("{}://extensions/?id={id}", browser_scheme(&n)));
+                }
+            });
+            let row = gtk::Box::builder().spacing(8).build();
             row.append(&cb);
             row.append(&state);
             row.append(&install);
+            row.append(&remove);
             f.wide(&row);
             (name.clone(), *registered, cb)
         })
@@ -224,7 +256,7 @@ pub fn open(ui: &Rc<Ui>) {
     f.note("These are kept by the browser extension, so they open in the browser rather than here:\n•  the on-page “Download this video” button and its quality menu\n•  the keys that force or prevent a takeover (for example hold Alt to let the browser download)\n•  which file types are taken over");
     let ext_settings = gtk::Button::with_label("Open extension settings in the browser");
     {
-        let first = statuses.iter().find(|s| s.1 && s.2 && s.0 != "firefox").map(|s| s.0.clone());
+        let first = statuses.iter().find(|s| s.2 && s.0 != "firefox").map(|s| s.0.clone());
         ext_settings.set_sensitive(first.is_some());
         ext_settings.connect_clicked(move |_| {
             if let Some(n) = &first {

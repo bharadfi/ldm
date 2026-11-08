@@ -144,47 +144,60 @@ fn config_root(home: &Path, b: &Browser) -> PathBuf {
 
 /// Reads the browsers' own profile files (read-only) to see whether the extension is there.
 pub fn extension_state(home: &Path, name: &str) -> ExtState {
-    let Some(b) = browser(name) else { return ExtState::Missing };
+    extension_found(home, name).0
+}
+
+/// Like `extension_state`, plus the extension ID that was found (the browser's page for it is `…://extensions/?id=ID`).
+pub fn extension_found(home: &Path, name: &str) -> (ExtState, &'static str) {
+    let Some(b) = browser(name) else { return (ExtState::Missing, CHROME_EXTENSION_ID) };
+    let mut found_id = CHROME_EXTENSION_ID;
     let mut best = ExtState::Missing;
     let rank = |s: ExtState| match s {
         ExtState::Installed => 2,
         ExtState::Disabled => 1,
         ExtState::Missing => 0,
     };
-    let mut consider = |s: ExtState| {
+    let mut consider = |s: ExtState, id: &'static str| {
         if rank(s) > rank(best) {
             best = s;
+            found_id = id;
         }
     };
     match b.kind {
         Kind::Chromium => {
-            let Ok(profiles) = std::fs::read_dir(config_root(home, b)) else { return best };
+            let Ok(profiles) = std::fs::read_dir(config_root(home, b)) else { return (best, found_id) };
             for p in profiles.flatten() {
                 for file in ["Preferences", "Secure Preferences"] {
                     let Ok(text) = std::fs::read_to_string(p.path().join(file)) else { continue };
                     let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
                     for id in [CHROME_EXTENSION_ID, LEGACY_CHROME_EXTENSION_ID] {
                         let Some(e) = v.pointer(&format!("/extensions/settings/{id}")) else { continue };
+                        // an extension loaded from a folder that has since gone is not really there
+                        if let Some(dir) = e.get("path").and_then(|p| p.as_str()).filter(|p| p.starts_with('/')) {
+                            if !Path::new(dir).join("manifest.json").is_file() {
+                                continue;
+                            }
+                        }
                         let off = e.get("disable_reasons").and_then(|d| d.as_array()).is_some_and(|d| !d.is_empty()) || e.get("state").and_then(|s| s.as_i64()) == Some(0);
-                        consider(if off { ExtState::Disabled } else { ExtState::Installed });
+                        consider(if off { ExtState::Disabled } else { ExtState::Installed }, id);
                     }
                 }
             }
         }
         Kind::Firefox => {
-            let Ok(profiles) = std::fs::read_dir(home.join(".mozilla/firefox")) else { return best };
+            let Ok(profiles) = std::fs::read_dir(home.join(".mozilla/firefox")) else { return (best, found_id) };
             for p in profiles.flatten() {
                 let Ok(text) = std::fs::read_to_string(p.path().join("extensions.json")) else { continue };
                 let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
                 for a in v.get("addons").and_then(|a| a.as_array()).into_iter().flatten() {
                     if a.get("id").and_then(|i| i.as_str()) == Some(FIREFOX_EXTENSION_ID) {
-                        consider(if a.get("active").and_then(|x| x.as_bool()) == Some(true) { ExtState::Installed } else { ExtState::Disabled });
+                        consider(if a.get("active").and_then(|x| x.as_bool()) == Some(true) { ExtState::Installed } else { ExtState::Disabled }, CHROME_EXTENSION_ID);
                     }
                 }
             }
         }
     }
-    best
+    (best, found_id)
 }
 
 /// Asks a Chromium-family browser to install the extension from `crx` the next time it starts: writes its

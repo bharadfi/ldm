@@ -30,7 +30,8 @@ async fn main() -> Result<()> {
             let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home directory"))?;
             let dirs: Vec<std::path::PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
             for b in install::status(&home, &dirs) {
-                println!("{} {} {} {}", b.name, if b.registered { "registered" } else { "no" }, if b.found { "found" } else { "absent" }, install::extension_state(&home, b.name).as_str());
+                let (st, id) = install::extension_found(&home, b.name);
+                println!("{} {} {} {} {}", b.name, if b.registered { "registered" } else { "no" }, if b.found { "found" } else { "absent" }, st.as_str(), id);
             }
             Ok(())
         }
