@@ -739,17 +739,14 @@ fn apply_queues(ui: &Ui, names: Vec<String>) {
     *ui.queue_names.borrow_mut() = names;
 }
 
-/// Map task id -> row of the backing store. Row handles are only valid until the store changes
-/// (removing rows invalidates them), so build this right before it is used.
-fn row_index(store: &gtk::ListStore) -> HashMap<i64, gtk::TreeIter> {
+/// Map task id -> row number of the backing store. Row numbers (not row handles) are kept: handles
+/// are only valid until the store changes, and a handle copied out of a walk proved unreliable.
+fn row_index(store: &gtk::ListStore) -> HashMap<i64, i32> {
     let m = store.upcast_ref::<gtk::TreeModel>();
     let mut index = HashMap::new();
-    if let Some(it) = m.iter_first() {
-        loop {
-            index.insert(m.get::<i64>(&it, C_ID as i32), it);
-            if !m.iter_next(&it) {
-                break;
-            }
+    for n in 0..m.iter_n_children(None) {
+        if let Some(it) = m.iter_nth_child(None, n) {
+            index.insert(m.get::<i64>(&it, C_ID as i32), n);
         }
     }
     index
@@ -762,8 +759,8 @@ fn apply_tasks(ui: &Ui, tasks: &[TaskInfo]) -> Vec<i64> {
     // Remove vanished rows one at a time, looking each row up again: a removal invalidates other handles.
     loop {
         let stale = row_index(store).into_iter().find(|(id, _)| !present.contains(id));
-        match stale {
-            Some((_, it)) => {
+        match stale.and_then(|(_, n)| store.upcast_ref::<gtk::TreeModel>().iter_nth_child(None, n)) {
+            Some(it) => {
                 store.remove(&it);
             }
             None => break,
@@ -809,8 +806,9 @@ fn apply_tasks(ui: &Ui, tasks: &[TaskInfo]) -> Vec<i64> {
             (C_CAT, &t.category.clone().unwrap_or_else(|| "Other".into())),
             (C_DEST, &t.dest.clone().unwrap_or_default()),
         ];
-        match index.get(&t.id) {
-            Some(it) => store.set(it, &cols),
+        let row = index.get(&t.id).and_then(|n| store.upcast_ref::<gtk::TreeModel>().iter_nth_child(None, *n));
+        match row {
+            Some(it) => store.set(&it, &cols),
             None => {
                 store.insert_with_values(None, &cols);
                 fresh.push(t.id);
