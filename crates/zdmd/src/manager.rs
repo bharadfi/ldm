@@ -46,7 +46,7 @@ fn load_settings(cfg: &Config) -> Settings {
         download_root: cfg.download_root.to_string_lossy().into_owned(),
         global_limit_kib: 0,
         category_dirs: Default::default(),
-        auto_retries: 3,
+        auto_retries: 8,
         post_command: None,
         on_exists: "rename".into(),
         category_exts: Default::default(),

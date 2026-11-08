@@ -527,7 +527,7 @@ mod tests {
     #[test]
     fn old_settings_files_still_load_and_after_all_is_validated() {
         let s: Settings = serde_json::from_str(r#"{"connections":4,"speed_limit_kib":0,"proxy":null,"download_root":"/d"}"#).unwrap();
-        assert_eq!((s.global_limit_kib, s.auto_retries, s.post_command), (0, 3, None));
+        assert_eq!((s.global_limit_kib, s.auto_retries, s.post_command), (0, 8, None));
         assert_eq!(s.on_exists, "rename");
         assert!(AfterAll::Command { command: String::new() }.validate().is_err());
         assert!(AfterAll::Shutdown.validate().is_ok());
