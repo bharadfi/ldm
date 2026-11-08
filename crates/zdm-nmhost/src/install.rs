@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde_json::json;
 
-use crate::{CHROME_EXTENSION_ID, FIREFOX_EXTENSION_ID, HOST_NAME};
+use crate::{CHROME_EXTENSION_ID, FIREFOX_EXTENSION_ID, HOST_NAME, LEGACY_CHROME_EXTENSION_ID};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
@@ -52,7 +52,7 @@ fn manifest(kind: Kind, exe: &Path, extra_chrome_ids: &[String]) -> String {
     });
     match kind {
         Kind::Chromium => {
-            let mut origins = vec![format!("chrome-extension://{CHROME_EXTENSION_ID}/")];
+            let mut origins = vec![format!("chrome-extension://{CHROME_EXTENSION_ID}/"), format!("chrome-extension://{LEGACY_CHROME_EXTENSION_ID}/")];
             origins.extend(extra_chrome_ids.iter().map(|id| format!("chrome-extension://{id}/")));
             m["allowed_origins"] = json!(origins);
         }
@@ -112,6 +112,92 @@ pub fn status(home: &Path, path_dirs: &[PathBuf]) -> Vec<BrowserStatus> {
             found: program_names(b.name).iter().any(|p| path_dirs.iter().any(|d| d.join(p).is_file())),
         })
         .collect()
+}
+
+/// Is our browser extension present in this browser?
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtState {
+    Installed,
+    /// Present but switched off (or waiting for the user to approve it).
+    Disabled,
+    Missing,
+}
+
+impl ExtState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ExtState::Installed => "installed",
+            ExtState::Disabled => "disabled",
+            ExtState::Missing => "missing",
+        }
+    }
+}
+
+fn browser(name: &str) -> Option<&'static Browser> {
+    BROWSERS.iter().find(|b| b.name == name)
+}
+
+/// Where a Chromium-family browser keeps its profiles (the parent of its NativeMessagingHosts folder).
+fn config_root(home: &Path, b: &Browser) -> PathBuf {
+    home.join(b.linux_dir).parent().map(Path::to_path_buf).unwrap_or_else(|| home.to_path_buf())
+}
+
+/// Reads the browsers' own profile files (read-only) to see whether the extension is there.
+pub fn extension_state(home: &Path, name: &str) -> ExtState {
+    let Some(b) = browser(name) else { return ExtState::Missing };
+    let mut best = ExtState::Missing;
+    let rank = |s: ExtState| match s {
+        ExtState::Installed => 2,
+        ExtState::Disabled => 1,
+        ExtState::Missing => 0,
+    };
+    let mut consider = |s: ExtState| {
+        if rank(s) > rank(best) {
+            best = s;
+        }
+    };
+    match b.kind {
+        Kind::Chromium => {
+            let Ok(profiles) = std::fs::read_dir(config_root(home, b)) else { return best };
+            for p in profiles.flatten() {
+                for file in ["Preferences", "Secure Preferences"] {
+                    let Ok(text) = std::fs::read_to_string(p.path().join(file)) else { continue };
+                    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
+                    for id in [CHROME_EXTENSION_ID, LEGACY_CHROME_EXTENSION_ID] {
+                        let Some(e) = v.pointer(&format!("/extensions/settings/{id}")) else { continue };
+                        let off = e.get("disable_reasons").and_then(|d| d.as_array()).is_some_and(|d| !d.is_empty()) || e.get("state").and_then(|s| s.as_i64()) == Some(0);
+                        consider(if off { ExtState::Disabled } else { ExtState::Installed });
+                    }
+                }
+            }
+        }
+        Kind::Firefox => {
+            let Ok(profiles) = std::fs::read_dir(home.join(".mozilla/firefox")) else { return best };
+            for p in profiles.flatten() {
+                let Ok(text) = std::fs::read_to_string(p.path().join("extensions.json")) else { continue };
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
+                for a in v.get("addons").and_then(|a| a.as_array()).into_iter().flatten() {
+                    if a.get("id").and_then(|i| i.as_str()) == Some(FIREFOX_EXTENSION_ID) {
+                        consider(if a.get("active").and_then(|x| x.as_bool()) == Some(true) { ExtState::Installed } else { ExtState::Disabled });
+                    }
+                }
+            }
+        }
+    }
+    best
+}
+
+/// Asks a Chromium-family browser to install the extension from `crx` the next time it starts: writes its
+/// "external extension" entry. Firefox has no such route for unsigned add-ons.
+pub fn request_extension(home: &Path, name: &str, crx: &Path, version: &str) -> Result<PathBuf> {
+    let b = browser(name).ok_or_else(|| anyhow::anyhow!("unknown browser '{name}'"))?;
+    anyhow::ensure!(b.kind == Kind::Chromium, "Firefox only accepts add-ons signed by Mozilla; use about:debugging for now");
+    anyhow::ensure!(crx.is_file(), "the extension package was not found: {}", crx.display());
+    let dir = config_root(home, b).join("External Extensions");
+    std::fs::create_dir_all(&dir)?;
+    let file = dir.join(format!("{CHROME_EXTENSION_ID}.json"));
+    std::fs::write(&file, serde_json::to_string_pretty(&json!({ "external_crx": crx, "external_version": version }))? + "\n")?;
+    Ok(file)
 }
 
 pub fn describe(a: &Action) -> String {
@@ -207,6 +293,23 @@ mod tests {
         assert_eq!(std::fs::read_to_string(home.path().join(".mozilla/native-messaging-hosts/com.zdm.host.json.bak")).unwrap(), "old");
         remove(&p).unwrap();
         assert!(!home.path().join(".config/chromium/NativeMessagingHosts/com.zdm.host.json").exists());
+    }
+
+    #[test]
+    fn extension_state_is_read_from_profiles_and_request_writes_entry() {
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(extension_state(home.path(), "brave"), ExtState::Missing);
+        let prof = home.path().join(".config/BraveSoftware/Brave-Browser/Default");
+        std::fs::create_dir_all(&prof).unwrap();
+        std::fs::write(prof.join("Preferences"), format!(r#"{{"extensions":{{"settings":{{"{CHROME_EXTENSION_ID}":{{"disable_reasons":[1]}}}}}}}}"#)).unwrap();
+        assert_eq!(extension_state(home.path(), "brave"), ExtState::Disabled);
+        std::fs::write(prof.join("Preferences"), format!(r#"{{"extensions":{{"settings":{{"{LEGACY_CHROME_EXTENSION_ID}":{{"disable_reasons":[]}}}}}}}}"#)).unwrap();
+        assert_eq!(extension_state(home.path(), "brave"), ExtState::Installed);
+        let crx = home.path().join("x.crx");
+        std::fs::write(&crx, "x").unwrap();
+        let f = request_extension(home.path(), "brave", &crx, "1.2.3").unwrap();
+        assert!(std::fs::read_to_string(f).unwrap().contains("\"external_version\": \"1.2.3\""));
+        assert!(request_extension(home.path(), "firefox", &crx, "1").is_err());
     }
 
     #[test]

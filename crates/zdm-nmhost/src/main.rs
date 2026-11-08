@@ -14,6 +14,7 @@ Usage:
   zdm-nmhost install   [--browser NAME]... [--chrome-extension-id ID]... [--dry-run]
   zdm-nmhost uninstall [--browser NAME]... [--dry-run]
   zdm-nmhost status
+  zdm-nmhost ext-install --browser NAME [--crx FILE]
 
 Browsers start it themselves with no arguments (native messaging over stdin/stdout).
 ";
@@ -29,8 +30,31 @@ async fn main() -> Result<()> {
             let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home directory"))?;
             let dirs: Vec<std::path::PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
             for b in install::status(&home, &dirs) {
-                println!("{} {} {}", b.name, if b.registered { "registered" } else { "no" }, if b.found { "found" } else { "absent" });
+                println!("{} {} {} {}", b.name, if b.registered { "registered" } else { "no" }, if b.found { "found" } else { "absent" }, install::extension_state(&home, b.name).as_str());
             }
+            Ok(())
+        }
+        Some("ext-install") => {
+            // asks a Chromium-family browser to install the extension at its next start
+            let mut name = None;
+            let mut crx = None;
+            let mut it = args[1..].iter();
+            while let Some(a) = it.next() {
+                match a.as_str() {
+                    "--browser" => name = it.next().cloned(),
+                    "--crx" => crx = it.next().map(std::path::PathBuf::from),
+                    other => bail!("unknown argument {other}\n\n{USAGE}"),
+                }
+            }
+            let name = name.ok_or_else(|| anyhow::anyhow!("--browser is required"))?;
+            let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home directory"))?;
+            let exe = std::env::current_exe()?;
+            let crx = crx
+                .or_else(|| ["/usr/share/linux-download-manager/ldm.crx"].iter().map(std::path::PathBuf::from).find(|p| p.is_file()))
+                .or_else(|| exe.ancestors().nth(3).map(|r| r.join("extension/dist/ldm.crx")).filter(|p| p.is_file()))
+                .ok_or_else(|| anyhow::anyhow!("the extension package (ldm.crx) was not found"))?;
+            let file = install::request_extension(&home, &name, &crx, env!("CARGO_PKG_VERSION"))?;
+            println!("wrote {}", file.display());
             Ok(())
         }
         Some("--help" | "-h" | "help") => {

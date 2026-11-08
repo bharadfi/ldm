@@ -7,8 +7,12 @@
 Standard library only. Load dist/chrome via chrome://extensions ("Load unpacked") and dist/firefox via
 about:debugging ("Load Temporary Add-on", pick manifest.json).
 """
+import base64
+import hashlib
 import json
+import os
 import re
+import subprocess
 import shutil
 import struct
 import sys
@@ -19,14 +23,14 @@ ROOT = Path(__file__).resolve().parent
 SRC = ROOT / "src"
 DIST = ROOT / "dist"
 
-VERSION = "0.1.6"
-# Public half of a throwaway key pair: pins the Chromium extension ID so the native-messaging manifest can
+VERSION = "0.1.7"
+# Public half of the extension signing key (the private half stays on the maintainer's computer): pins the Chromium extension ID so the native-messaging manifest can
 # allow exactly this extension. Must match CHROME_EXTENSION_ID in crates/zdm-nmhost/src/lib.rs.
 CHROME_KEY = (
-    "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAi59QVd2ctkGw+FFVLJsgCHnJY5MYWh70J31DLHGP0X4qfiUE5lbDj4Q3a7ADK9tOylMZaaTpp79s"
-    "sbrPfFtDoo3RcaBkUttEIJsbIB9byikgqQ4NFLEG5VMrEg5OLWuyheUjHbBoNXoOgWX/uEVIhtEVakDzh2mf7uYiWwK35tuvIqvBlZdW4SCrQr+IlyP3zz6B"
-    "DtJ80xXEg/wpPt46vuAgxOTToM9/YZgAE7CT/M39ujoQU1V3kZ8Etgc8MLp3OdDpP7YoAiCTagi6TktGdZ9CyZOBa4cxYCxkEv8iJMfwwRBNydPSwFgArC//"
-    "yNsb8BQz3eMF9nfMFlA09nKFJQIDAQAB"
+    "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA91+tLwIAYTr6kkU0PDG4PVY06ywndrqcjS+V9B4LTo6apzpHf/3p2LUOYy7PP0KFuHiYToAS8yni"
+    "L0xlFgPqjdFORgiMA+JDhEzC384wRKt7qTEm7er7cUWtW4mMCkMkkKHulavii3BI8Owpvky1lnRPEfnXWNb2l4fq1h5TpVRj4oii/89Nm+t2NJ/jjs7JRxnZ"
+    "NVv7k7X1dbalZ9NZ+gMCQp0o901XrUnOsKjX49MnQVo527IDOtYA3GtiTN5H+R39oj/E7l6XpYTVJsaLZQe0+AApMvDiY9a8pIFa+ZkzH3UVEgWp3a6IGFKU"
+    "BFQucC2rKztLsnufrkIxPgnznwIDAQAB"
 )
 FIREFOX_ID = "zdm@zdm.invalid"
 
@@ -117,6 +121,31 @@ def build(target):
     return out
 
 
+def _varint(n):
+    out = b""
+    while True:
+        b = n & 0x7F
+        n >>= 7
+        out += bytes([b | (0x80 if n else 0)])
+        if not n:
+            return out
+
+
+def _field(num, data):
+    return _varint((num << 3) | 2) + _varint(len(data)) + data
+
+
+def pack_crx(zip_bytes, pem_path):
+    """CRX3 file (what Chromium-family browsers install from an 'external extension' entry)."""
+    der = subprocess.check_output(["openssl", "rsa", "-in", pem_path, "-pubout", "-outform", "DER"], stderr=subprocess.DEVNULL)
+    crx_id = hashlib.sha256(der).digest()[:16]
+    signed_data = _field(1, crx_id)
+    to_sign = b"CRX3 SignedData\x00" + struct.pack("<I", len(signed_data)) + signed_data + zip_bytes
+    sig = subprocess.run(["openssl", "dgst", "-sha256", "-sign", pem_path], input=to_sign, stdout=subprocess.PIPE, check=True).stdout
+    header = _field(2, _field(1, der) + _field(2, sig)) + _field(10000, signed_data)
+    return b"Cr24" + struct.pack("<II", 3, len(header)) + header + zip_bytes
+
+
 def main():
     DIST.mkdir(exist_ok=True)
     for t in ("chrome", "firefox"):
@@ -125,6 +154,12 @@ def main():
         if "--zip" in sys.argv:
             z = shutil.make_archive(str(DIST / f"zdm-{t}"), "zip", out)
             print(f"zipped {z}")
+        if t == "chrome" and "--crx" in sys.argv:
+            pem = os.environ.get("LDM_CRX_KEY") or os.path.expanduser("~/.local/share/ldm-signing/extension.pem")
+            z = shutil.make_archive(str(DIST / "ldm-unsigned"), "zip", out)
+            (DIST / "ldm.crx").write_bytes(pack_crx(Path(z).read_bytes(), pem))
+            Path(z).unlink()
+            print(f"packed {DIST / 'ldm.crx'}")
 
 
 if __name__ == "__main__":

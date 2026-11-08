@@ -2792,7 +2792,7 @@ dependencies = [
 
 [[package]]
 name = "zdm-cli"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "clap",
@@ -2804,7 +2804,7 @@ dependencies = [
 
 [[package]]
 name = "zdm-core"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "aes",
  "anyhow",
@@ -2826,7 +2826,7 @@ dependencies = [
 
 [[package]]
 name = "zdm-gui"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -2837,12 +2837,13 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "zdm-nmhost",
  "zdm-proto",
 ]
 
 [[package]]
 name = "zdm-nmhost"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "dirs",
@@ -2855,7 +2856,7 @@ dependencies = [
 
 [[package]]
 name = "zdm-proto"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "dirs",
@@ -2866,7 +2867,7 @@ dependencies = [
 
 [[package]]
 name = "zdmd"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

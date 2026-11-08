@@ -19,7 +19,7 @@ target/release/zdm-nmhost install           # writes them (backs up a differing 
 Then restart the browser and load the extension:
 
 - **Chrome/Chromium/Brave/Edge**: `chrome://extensions` → Developer mode → *Load unpacked* → `extension/dist/chrome`.
-  The extension ID is fixed (`oihpkfhbmggccackdffcmhlbficmdigk`, set by the `key` in the manifest), which is what the
+  The extension ID is fixed (`odbjkklmbbepkigbapicgcoedgjcaoed`, set by the `key` in the manifest), which is what the
   native-messaging manifest allows. A copy published to a store gets a different ID: install with
   `--chrome-extension-id <id>` to allow it too.
 - **Firefox**: `about:debugging#/runtime/this-firefox` → *Load Temporary Add-on* → `extension/dist/firefox/manifest.json`.

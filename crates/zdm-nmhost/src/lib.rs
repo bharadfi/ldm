@@ -12,7 +12,9 @@ use zdm_proto::AddRequest;
 
 pub const HOST_NAME: &str = "com.zdm.host";
 /// Stable Chrome/Chromium/Edge/Brave extension ID (from the public `key` in the extension manifest).
-pub const CHROME_EXTENSION_ID: &str = "oihpkfhbmggccackdffcmhlbficmdigk";
+pub const CHROME_EXTENSION_ID: &str = "odbjkklmbbepkigbapicgcoedgjcaoed";
+/// The ID used by versions up to 0.1.6 (loaded by hand); still allowed so those installs keep working.
+pub const LEGACY_CHROME_EXTENSION_ID: &str = "oihpkfhbmggccackdffcmhlbficmdigk";
 pub const FIREFOX_EXTENSION_ID: &str = "zdm@zdm.invalid";
 
 /// Chrome refuses host->browser messages above 1 MiB; we also refuse the reverse to bound memory.
