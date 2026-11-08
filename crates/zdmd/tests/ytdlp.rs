@@ -12,13 +12,20 @@ use zdmd::store::Store;
 
 const FAKE: &str = r#"#!/bin/sh
 # stands in for yt-dlp: `-J` prints a saved format list, anything else "downloads"
+echo "$*" >> "${ZDM_ARGLOG:-/dev/null}"
+for a in "$@"; do url="$a"; done
+key=$(printf %s "$url" | tr -c 'A-Za-z0-9' '_')
+prev=""
 for a in "$@"; do
+  [ "$prev" = "--cookies" ] && cp "$a" "$ZDM_LOGDIR/cookies-$key"
+  prev="$a"
   case "$a" in
+    *BOTCHECK*) echo "ERROR: [youtube] x: Sign in to confirm you’re not a bot. Use --cookies-from-browser or --cookies for the authentication." >&2; exit 1;;
     *FAILURL*) echo "ERROR: [fake] Unsupported URL: $a" >&2; exit 1;;
   esac
 done
 for a in "$@"; do
-  if [ "$a" = "-J" ]; then cat "$ZDM_FIXTURE"; exit 0; fi
+  if [ "$a" = "-J" ]; then echo x >> "$ZDM_LOGDIR/count-$key"; cat "$ZDM_FIXTURE"; exit 0; fi
 done
 out=""; sel=""; prev=""; allargs="$*"
 for a in "$@"; do
@@ -52,6 +59,8 @@ fn setup() {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::env::set_var("ZDM_YTDLP", &script);
+        std::env::set_var("ZDM_ARGLOG", dir.join("args.log"));
+        std::env::set_var("ZDM_LOGDIR", &dir);
         std::env::set_var("ZDM_FIXTURE", concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ytdlp-formats.json"));
         #[allow(static_mut_refs)]
         unsafe {
@@ -108,11 +117,11 @@ impl Env {
 #[tokio::test(flavor = "multi_thread")]
 async fn page_lookup_returns_the_curated_menu_and_reports_failures() {
     let e = env();
-    let l = e.m.formats("https://video.test/watch?v=abc").await.unwrap();
+    let l = e.m.formats("https://video.test/watch?v=abc", None).await.unwrap();
     assert!(l.options.iter().any(|o| o.id == "299+140" && o.label.contains("1080p")), "{:?}", l.options.iter().map(|o| &o.label).collect::<Vec<_>>());
-    let err = e.m.formats("https://video.test/FAILURL").await.unwrap_err();
+    let err = e.m.formats("https://video.test/FAILURL", None).await.unwrap_err();
     assert!(format!("{err:#}").contains("Unsupported URL"), "{err:#}");
-    assert!(e.m.formats("ftp://x/y").await.is_err());
+    assert!(e.m.formats("ftp://x/y", None).await.is_err());
     e.stop().await;
 }
 
@@ -156,10 +165,10 @@ async fn passes_the_right_options_to_yt_dlp() {
             tokio::time::sleep(Duration::from_millis(30)).await;
         }
     };
-    for needle in ["-f SLOWARGS", "--merge-output-format mp4", "--limit-rate 300K", "--proxy socks5://127.0.0.1:9", "--referer https://video.test/", "--add-headers Cookie:a=b", "--no-playlist", "-- https://video.test/watch?v=args"] {
+    for needle in ["-f SLOWARGS", "--merge-output-format mp4", "--limit-rate 300K", "--proxy socks5://127.0.0.1:9", "--referer https://video.test/", "--cookies /", "--no-playlist", "-- https://video.test/watch?v=args"] {
         assert!(args.contains(needle), "missing {needle:?} in: {args}");
     }
-    assert!(!args.contains("x-zdm"), "{args}");
+    assert!(!args.contains("x-zdm") && !args.contains("--add-headers Cookie"), "the Cookie header goes in a cookie file, not a header: {args}");
     e.m.pause(t.id).unwrap();
     let t0 = Instant::now();
     while e.m.get(t.id).unwrap().state != State::Paused || t0.elapsed() < Duration::from_millis(300) {
@@ -195,5 +204,66 @@ async fn formats_of_one_page_are_separate_downloads_and_final_errors_are_not_ret
     assert!(a.error.as_deref().unwrap().contains("Video unavailable"), "{:?}", a.error);
     assert_eq!(e.m.retry_count(), 0, "an unavailable video is not retried");
     assert!(e.m.add(AddRequest { url: url.into(), ytdlp: Some("--exec rm".into()), start: true, ..Default::default() }).is_err(), "a selector must not look like an option");
+    e.stop().await;
+}
+
+fn log_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(std::env::var("ZDM_LOGDIR").unwrap())
+}
+
+/// Logs of the fake are kept per page address (tests run in parallel).
+fn key(url: &str) -> String {
+    url.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn browser_cookies_reach_yt_dlp_in_a_private_file_that_is_removed_afterwards() {
+    let e = env();
+    let url = "https://cookies.test/watch?v=one";
+    e.m.formats(url, Some("VISITOR=abc; CONSENT=yes")).await.unwrap();
+    let args = std::fs::read_to_string(log_dir().join("args.log")).unwrap();
+    let line = args.lines().filter(|l| l.contains("--cookies ") && l.contains("cookies.test/watch?v=one")).next_back().expect("yt-dlp was given a cookie file");
+    let path = line.split("--cookies ").nth(1).unwrap().split_whitespace().next().unwrap();
+    let copy = std::fs::read_to_string(log_dir().join(format!("cookies-{}", key(url)))).unwrap();
+    assert!(copy.contains(".cookies.test\tTRUE\t/\tTRUE") && copy.contains("\tVISITOR\tabc") && copy.contains("\tCONSENT\tyes"), "{copy}");
+    assert!(!std::path::Path::new(path).exists(), "the cookie file must be deleted once yt-dlp is done: {path}");
+    e.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn chosen_browser_cookies_are_used_only_when_the_page_sent_none() {
+    let e = env();
+    let mut s = e.m.settings();
+    s.ytdlp_cookies_browser = Some("firefox".into());
+    e.m.set_settings(s).unwrap();
+    e.m.formats("https://browser-cookies.test/watch?v=a", None).await.unwrap();
+    e.m.formats("https://browser-cookies.test/watch?v=b", Some("x=y")).await.unwrap();
+    let args = std::fs::read_to_string(log_dir().join("args.log")).unwrap();
+    let a = args.lines().find(|l| l.contains("browser-cookies.test/watch?v=a")).unwrap();
+    let b = args.lines().find(|l| l.contains("browser-cookies.test/watch?v=b")).unwrap();
+    assert!(a.contains("--cookies-from-browser firefox") && !a.contains("--cookies /"), "{a}");
+    assert!(b.contains("--cookies /") && !b.contains("--cookies-from-browser"), "{b}");
+    assert!(e.m.set_settings(zdm_proto::Settings { ytdlp_cookies_browser: Some("netscape".into()), ..e.m.settings() }).is_err());
+    e.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_same_page_is_looked_up_once_and_a_bot_check_is_explained_and_not_retried() {
+    let e = env();
+    let url = "https://cache.test/watch?v=twice";
+    let counter = log_dir().join(format!("count-{}", key(url)));
+    let a = e.m.formats(url, None).await.unwrap();
+    let b = e.m.formats(url, None).await.unwrap();
+    assert_eq!(a, b);
+    assert_eq!(std::fs::read_to_string(counter).unwrap().lines().count(), 1, "the second lookup comes from the cache");
+
+    let err = e.m.formats("https://video.test/BOTCHECK", None).await.unwrap_err();
+    assert!(format!("{err:#}").contains("not a robot") && format!("{err:#}").contains("Options"), "{err:#}");
+    // as a download it fails once, in plain words, and is not retried (retrying would make it worse)
+    let t = e.m.add(AddRequest { url: "https://video.test/BOTCHECK".into(), ytdlp: Some("299+140".into()), filename: Some("x.mp4".into()), start: true, ..Default::default() }).unwrap();
+    let t = e.finished(t.id).await;
+    assert_eq!(t.state, State::Failed);
+    assert!(t.error.as_deref().unwrap().contains("not a robot"), "{:?}", t.error);
+    assert_eq!(e.m.retry_count(), 0);
     e.stop().await;
 }

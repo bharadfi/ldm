@@ -296,3 +296,10 @@ test('errors are explained in plain words and never swallowed', () => {
   assert.equal(explainError('yt-dlp (yt-dlp 2024.04.09) could not read this page'), 'yt-dlp (yt-dlp 2024.04.09) could not read this page', 'the app\'s own messages pass through');
   assert.equal(explainError(''), 'unknown error');
 });
+
+import { buildFormatsMessage } from '../src/core.js';
+
+test('the formats question carries the page cookies when there are any', () => {
+  assert.deepEqual(buildFormatsMessage({ url: 'https://v.test/watch?v=1', cookie: 'a=b; c=d' }), { type: 'formats', url: 'https://v.test/watch?v=1', cookie: 'a=b; c=d' });
+  assert.deepEqual(buildFormatsMessage({ url: 'https://v.test/watch?v=1', cookie: '' }), { type: 'formats', url: 'https://v.test/watch?v=1' });
+});

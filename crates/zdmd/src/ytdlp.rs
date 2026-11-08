@@ -91,6 +91,71 @@ pub fn ytdlp_path() -> Option<PathBuf> {
     ytdlp_info().map(|(p, _)| p)
 }
 
+/// Plain words for yt-dlp's well-known refusals; `None` leaves the original text.
+pub fn friendly(line: &str) -> Option<String> {
+    let l = line.to_ascii_lowercase();
+    if l.contains("sign in to confirm") || l.contains("not a bot") {
+        return Some("YouTube is asking for proof that this is not a robot. It does this when a computer makes many automatic requests, and usually lets go after a few hours. The browser button sends your browser's own cookies, which normally avoids it; for the app's own \"Download video from a web page\", choose a browser in Options > Downloads > \"Use the cookies of this browser\"".to_string());
+    }
+    if l.contains("video unavailable") || l.contains("private video") {
+        return Some(line.trim().to_string());
+    }
+    None
+}
+
+/// Netscape cookie file content for a browser `Cookie` header (`a=b; c=d`) of a page on `host`. The cookies are
+/// given to the registrable domain (`www.youtube.com` -> `.youtube.com`), which is where sites keep them.
+pub fn netscape_cookies(host: &str, cookie_header: &str, secure: bool, expires: u64) -> String {
+    let labels: Vec<&str> = host.trim_start_matches('.').split('.').collect();
+    let keep = if labels.len() >= 3 && labels[labels.len() - 1].len() == 2 && ["co", "com", "org", "net", "gov", "ac"].contains(&labels[labels.len() - 2]) { 3 } else { 2 };
+    let domain = format!(".{}", labels[labels.len().saturating_sub(keep)..].join("."));
+    let mut out = String::from("# Netscape HTTP Cookie File\n");
+    for pair in cookie_header.split(';') {
+        let Some((name, value)) = pair.trim().split_once('=') else { continue };
+        if name.is_empty() || name.contains(['\t', '\n', '\r']) || value.contains(['\t', '\n', '\r']) {
+            continue;
+        }
+        out += &format!("{domain}\tTRUE\t/\t{}\t{expires}\t{name}\t{value}\n", if secure { "TRUE" } else { "FALSE" });
+    }
+    out
+}
+
+/// A private (0600) cookie file for yt-dlp that is deleted when dropped.
+struct CookieFile(PathBuf);
+
+impl CookieFile {
+    fn create(page_url: &str, cookie_header: &str) -> Option<CookieFile> {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let u = url::Url::parse(page_url).ok()?;
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos();
+        let path = std::env::temp_dir().join(format!("zdm-cookies-{}-{nanos}.txt", std::process::id()));
+        let expires = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() + 365 * 86400;
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path).ok()?;
+        f.write_all(netscape_cookies(u.host_str()?, cookie_header, u.scheme() == "https", expires).as_bytes()).ok()?;
+        Some(CookieFile(path))
+    }
+}
+
+impl Drop for CookieFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Cookie arguments for yt-dlp: the browser's cookies for this page when we have them, else the browser
+/// the user chose in Options. The returned guard keeps the temporary file alive.
+fn cookie_args(cmd: &mut tokio::process::Command, page_url: &str, cookie: Option<&str>, browser: Option<&str>) -> Option<CookieFile> {
+    if let Some(file) = cookie.filter(|c| !c.trim().is_empty()).and_then(|c| CookieFile::create(page_url, c)) {
+        cmd.arg("--cookies").arg(&file.0);
+        return Some(file);
+    }
+    if let Some(b) = browser {
+        cmd.args(["--cookies-from-browser", b]);
+    }
+    None
+}
+
 fn version_note() -> String {
     ytdlp_info().map(|(_, v)| format!(" (yt-dlp {v})")).unwrap_or_default()
 }
@@ -225,19 +290,42 @@ pub fn curate(v: &Value) -> FormatList {
 }
 
 /// Ask yt-dlp what the page at `url` offers.
-pub async fn list_formats(url: &str, proxy: Option<&str>) -> Result<FormatList> {
+pub async fn list_formats(url: &str, proxy: Option<&str>, cookie: Option<&str>, cookie_browser: Option<&str>) -> Result<FormatList> {
+    // the same page asked again soon (a second click, the app after the browser) is answered without
+    // bothering the site: many automatic requests are what makes sites distrust a computer
+    static CACHE: std::sync::Mutex<Vec<(String, std::time::Instant, FormatList)>> = std::sync::Mutex::new(Vec::new());
+    let key = format!("{url}|{}", cookie.is_some());
+    if let Some((_, _, l)) = CACHE.lock().unwrap().iter().find(|(k, at, _)| *k == key && at.elapsed() < Duration::from_secs(600)) {
+        return Ok(l.clone());
+    }
+    let list = list_formats_uncached(url, proxy, cookie, cookie_browser).await?;
+    let mut c = CACHE.lock().unwrap();
+    c.retain(|(k, at, _)| *k != key && at.elapsed() < Duration::from_secs(600));
+    c.push((key, std::time::Instant::now(), list.clone()));
+    if c.len() > 40 {
+        c.remove(0);
+    }
+    Ok(list)
+}
+
+async fn list_formats_uncached(url: &str, proxy: Option<&str>, cookie: Option<&str>, cookie_browser: Option<&str>) -> Result<FormatList> {
     let exe = need_ytdlp()?;
     let mut cmd = tokio::process::Command::new(exe);
     cmd.args(["-J", "--no-playlist", "--no-warnings", "--no-colors"]);
     if let Some(p) = proxy {
         cmd.args(["--proxy", p]);
     }
+    let _cookie_guard = cookie_args(&mut cmd, url, cookie, cookie_browser);
     cmd.arg("--").arg(url).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     let out = tokio::time::timeout(Duration::from_secs(90), cmd.output()).await.map_err(|_| anyhow!("the site took too long to answer"))?.context("could not start yt-dlp")?;
     if !out.status.success() {
         let e = String::from_utf8_lossy(&out.stderr);
         let line = e.lines().rev().find(|l| l.contains("ERROR")).or_else(|| e.lines().last()).unwrap_or("unknown error");
-        bail!("yt-dlp{} could not read this page: {}. If this keeps happening, update yt-dlp with `yt-dlp -U`.", version_note(), line.trim_start_matches("ERROR: ").trim());
+        let reason = line.trim_start_matches("ERROR: ").trim();
+        match friendly(reason) {
+            Some(f) => bail!("{f}"),
+            None => bail!("yt-dlp{} could not read this page: {reason}. If this keeps happening, update yt-dlp with `yt-dlp -U`.", version_note()),
+        }
     }
     let v: Value = serde_json::from_slice(&out.stdout).context("yt-dlp gave an unreadable answer")?;
     if v.is_null() {
@@ -286,6 +374,8 @@ pub struct YtdlpJob<'a> {
     pub headers: &'a [(String, String)],
     /// KiB/s, 0 = unlimited.
     pub limit_kib: u64,
+    /// Browser whose cookies yt-dlp may use when the task has none of its own (from Options).
+    pub cookie_browser: Option<&'a str>,
     pub cancel: &'a CancellationToken,
 }
 
@@ -320,7 +410,11 @@ pub async fn download(job: YtdlpJob<'_>, on_progress: impl Fn(u64, u64) + Send +
     if let Some(ua) = job.user_agent {
         cmd.args(["--user-agent", ua]);
     }
-    for (k, v) in job.headers {
+    // the browser's Cookie header becomes a private cookie file (yt-dlp keeps its own cookie jar; a plain header is
+    // ignored by some sites); other headers are passed as they are
+    let cookie = job.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("cookie")).map(|(_, v)| v.as_str());
+    let _cookie_guard = cookie_args(&mut cmd, job.page_url, cookie, job.cookie_browser);
+    for (k, v) in job.headers.iter().filter(|(k, _)| !k.eq_ignore_ascii_case("cookie")) {
         cmd.args(["--add-headers", &format!("{k}:{v}")]);
     }
     cmd.arg("-o").arg(work.join("out.%(ext)s")).arg("--").arg(job.page_url);
@@ -359,7 +453,11 @@ pub async fn download(job: YtdlpJob<'_>, on_progress: impl Fn(u64, u64) + Send +
     if !status.success() {
         let e = err.await.unwrap_or_default();
         let line = e.lines().rev().find(|l| l.contains("ERROR")).or_else(|| e.lines().last()).unwrap_or("it stopped without a message");
-        bail!("yt-dlp could not download this: {}", line.trim_start_matches("ERROR: ").trim());
+        let reason = line.trim_start_matches("ERROR: ").trim();
+        match friendly(reason) {
+            Some(f) => bail!("{f}"),
+            None => bail!("yt-dlp could not download this: {reason}"),
+        }
     }
     // the finished file is the biggest `out.*` that is not a partial or bookkeeping leftover (when yt-dlp joins
     // video and audio it deletes the separate streams itself)
@@ -450,6 +548,21 @@ mod tests {
         .unwrap();
         assert_eq!(best.0, PathBuf::from("/home/me/.local/bin/yt-dlp"));
         assert!(newest(vec![]).is_none());
+    }
+
+    #[test]
+    fn cookie_file_and_friendly_messages() {
+        let f = netscape_cookies("www.youtube.com", "VISITOR=abc; CONSENT=yes; broken; =novalue; PREF=f6=40000000&tz=Asia", true, 1_900_000_000);
+        let lines: Vec<&str> = f.lines().collect();
+        assert_eq!(lines[0], "# Netscape HTTP Cookie File");
+        assert_eq!(lines[1], ".youtube.com\tTRUE\t/\tTRUE\t1900000000\tVISITOR\tabc");
+        assert_eq!(lines.len(), 4, "two good cookies and one with '=' inside its value; malformed pieces are skipped: {f}");
+        assert!(lines[3].ends_with("PREF\tf6=40000000&tz=Asia"));
+        assert!(netscape_cookies("news.bbc.co.uk", "a=b", false, 1).contains(".bbc.co.uk\tTRUE\t/\tFALSE\t1\ta\tb"), "two-part public suffixes keep three labels");
+        assert!(netscape_cookies("localhost", "a=b", false, 1).contains(".localhost"));
+        assert!(friendly("[youtube] x: Sign in to confirm you’re not a bot. Use --cookies-from-browser").unwrap().contains("not a robot"));
+        assert!(friendly("ERROR: Video unavailable").is_some());
+        assert!(friendly("HTTP Error 404").is_none());
     }
 
     #[test]

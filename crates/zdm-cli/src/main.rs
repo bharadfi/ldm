@@ -275,7 +275,7 @@ async fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Get(a) => get(a).await,
         Cmd::Formats { url } => {
-            if let Response::Formats(l) = call(&Request::Formats { url }).await? {
+            if let Response::Formats(l) = call(&Request::Formats { url, cookie: None }).await? {
                 println!("{}", l.title);
                 for o in &l.options {
                     let size = o.size.map_or(String::new(), |s| format!("  ~{:.1} MB", s as f64 / 1e6));

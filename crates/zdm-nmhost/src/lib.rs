@@ -48,7 +48,7 @@ pub enum Msg {
     Ping,
     Add(AddRequest),
     /// What a video page offers (answered by yt-dlp through the daemon).
-    Formats { url: String },
+    Formats { url: String, cookie: Option<String> },
 }
 
 const MAX_URL: usize = 8192;
@@ -73,7 +73,8 @@ pub fn parse_message(v: &Value) -> Result<Msg, String> {
             if !(url.starts_with("http://") || url.starts_with("https://")) {
                 return Err("only http:// and https:// pages can be looked up".into());
             }
-            Ok(Msg::Formats { url })
+            let cookie = opt_str(v, "cookie", MAX_COOKIE)?.filter(|c| !c.contains(['\r', '\n']));
+            Ok(Msg::Formats { url, cookie })
         }
         Some("add") => {
             let url = opt_str(v, "url", MAX_URL)?.ok_or("url is required")?;
@@ -187,7 +188,9 @@ mod tests {
 
     #[test]
     fn video_page_messages() {
-        assert_eq!(parse_message(&json!({"type": "formats", "url": "https://v.test/watch?v=1"})).unwrap(), Msg::Formats { url: "https://v.test/watch?v=1".into() });
+        assert_eq!(parse_message(&json!({"type": "formats", "url": "https://v.test/watch?v=1"})).unwrap(), Msg::Formats { url: "https://v.test/watch?v=1".into(), cookie: None });
+        assert_eq!(parse_message(&json!({"type": "formats", "url": "https://v.test/w", "cookie": "a=b; c=d"})).unwrap(), Msg::Formats { url: "https://v.test/w".into(), cookie: Some("a=b; c=d".into()) });
+        assert_eq!(parse_message(&json!({"type": "formats", "url": "https://v.test/w", "cookie": "a=b\r\nX: 1"})).unwrap(), Msg::Formats { url: "https://v.test/w".into(), cookie: None }, "a header-injection attempt is dropped");
         assert!(parse_message(&json!({"type": "formats", "url": "file:///etc/passwd"})).is_err());
         assert!(parse_message(&json!({"type": "formats"})).is_err());
         let Msg::Add(a) = parse_message(&json!({"type": "add", "url": "https://v.test/watch?v=1", "format": "299+140", "filename": "Clip [1080p].mp4"})).unwrap() else { panic!() };

@@ -238,7 +238,13 @@ pub struct Settings {
     /// Saved sign-ins per site (Basic and Digest).
     #[serde(default)]
     pub site_logins: Vec<SiteLogin>,
+    /// Let yt-dlp use the cookies of this browser (`brave`, `chrome`, `chromium`, `firefox`, `edge`, `vivaldi`, `opera`)
+    /// for video pages, when the browser extension did not send any. Helps against "sign in to confirm you're not a bot".
+    #[serde(default)]
+    pub ytdlp_cookies_browser: Option<String>,
 }
+
+pub const COOKIE_BROWSERS: [&str; 7] = ["brave", "chrome", "chromium", "firefox", "edge", "vivaldi", "opera"];
 
 fn default_on_exists() -> String {
     "rename".into()
@@ -309,6 +315,11 @@ impl Settings {
                 return Err(format!("file types of category \"{cat}\" must be plain extensions such as zip or mp3"));
             }
         }
+        if let Some(b) = &self.ytdlp_cookies_browser {
+            if !COOKIE_BROWSERS.contains(&b.as_str()) {
+                return Err(format!("cookies can be taken from: {}", COOKIE_BROWSERS.join(", ")));
+            }
+        }
         for l in &self.site_logins {
             let host_ok = !l.host.is_empty() && l.host.len() <= 253 && l.host.chars().all(|c| c.is_ascii_alphanumeric() || ".-_".contains(c));
             if !host_ok {
@@ -354,7 +365,13 @@ pub enum Request {
     /// Crawl for files (can take a while; answered with `Links`).
     Grab(GrabRequest),
     /// What can be downloaded from a video page (asks yt-dlp; can take ten seconds; answered with `Formats`).
-    Formats { url: String },
+    Formats {
+        url: String,
+        /// `Cookie` header value of the page in the user's browser (helps with sites that ask for a sign-in or
+        /// a "not a bot" check). Used only for this lookup.
+        #[serde(default)]
+        cookie: Option<String>,
+    },
     Ping,
 }
 
@@ -480,7 +497,7 @@ mod tests {
 
     #[test]
     fn settings_validation() {
-        let ok = Settings { connections: 8, speed_limit_kib: 0, proxy: None, download_root: "/tmp/x".into(), global_limit_kib: 0, category_dirs: Default::default(), auto_retries: 3, post_command: None, on_exists: "rename".into(), category_exts: Default::default(), site_logins: vec![] };
+        let ok = Settings { connections: 8, speed_limit_kib: 0, proxy: None, download_root: "/tmp/x".into(), global_limit_kib: 0, category_dirs: Default::default(), auto_retries: 3, post_command: None, on_exists: "rename".into(), category_exts: Default::default(), site_logins: vec![], ytdlp_cookies_browser: None };
         assert!(ok.validate().is_ok());
         assert!(Settings { connections: 0, ..ok.clone() }.validate().is_err());
         assert!(Settings { connections: 33, ..ok.clone() }.validate().is_err());
@@ -488,6 +505,8 @@ mod tests {
         assert!(Settings { proxy: Some("socks5://127.0.0.1:1080".into()), ..ok.clone() }.validate().is_ok());
         assert!(Settings { auto_retries: 21, ..ok.clone() }.validate().is_err());
         assert!(Settings { on_exists: "ask".into(), ..ok.clone() }.validate().is_err());
+        assert!(Settings { ytdlp_cookies_browser: Some("brave".into()), ..ok.clone() }.validate().is_ok());
+        assert!(Settings { ytdlp_cookies_browser: Some("netscape".into()), ..ok.clone() }.validate().is_err());
         let login = |h: &str, u: &str| SiteLogin { host: h.into(), user: u.into(), pass: "pw".into() };
         assert!(Settings { site_logins: vec![login("files.example.com", "ann")], ..ok.clone() }.validate().is_ok());
         for bad in [login("", "ann"), login("a b", "ann"), login("https://x.com", "ann"), login("x.com", ""), login("x.com", "a:b")] {

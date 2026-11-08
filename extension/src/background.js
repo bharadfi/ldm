@@ -1,4 +1,4 @@
-import { DEFAULTS, shouldHandle, isHttp, classifyMedia, addMedia, parseHlsVariants } from './core.js';
+import { DEFAULTS, shouldHandle, isHttp, classifyMedia, addMedia, parseHlsVariants, buildFormatsMessage, cookieHeader } from './core.js';
 import { handOver, sendToHost } from './host.js';
 
 const api = globalThis.browser ?? globalThis.chrome;
@@ -138,7 +138,10 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       case 'media-list':
         return { sniffed: await mediaFor(tab.id) };
       case 'formats': {
-        const r = await sendToHost({ type: 'formats', url: tab.url });
+        // the page's own cookies go along: sites such as YouTube answer a real browser session, but may refuse
+        // an anonymous program ("confirm you're not a bot")
+        const cookie = cookieHeader(await api.cookies.getAll({ url: tab.url }));
+        const r = await sendToHost(buildFormatsMessage({ url: tab.url, cookie }));
         return { title: r.title, options: r.options };
       }
       case 'download': {

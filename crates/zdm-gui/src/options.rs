@@ -238,6 +238,12 @@ pub fn open(ui: &Rc<Ui>) {
     f.note("A shell command, for example a virus scan: clamscan \"$ZDM_FILE\". The finished file is in $ZDM_FILE. If it fails, the download is kept and a note is added.");
     let post = gtk::Entry::builder().text(cur.post_command.clone().unwrap_or_default()).placeholder_text("(none)").build();
     f.wide(&post);
+    f.heading("Video sites");
+    f.note("YouTube and some other sites ask for a sign-in or a \"not a robot\" check when a program (not a browser) asks for a video. The browser button avoids this by sending the page's own cookies. For “Download video from a web page” in this program, you can let yt-dlp use the cookies of one of your browsers. Only the cookies of the video site are used.");
+    let cookie_browsers: Vec<Option<&str>> = std::iter::once(None).chain(zdm_proto::COOKIE_BROWSERS.iter().copied().map(Some)).collect();
+    let cookie_dd = gtk::DropDown::from_strings(&["Do not use browser cookies", "Brave", "Google Chrome", "Chromium", "Firefox", "Microsoft Edge", "Vivaldi", "Opera"]);
+    cookie_dd.set_selected(cookie_browsers.iter().position(|b| *b == cur.ytdlp_cookies_browser.as_deref()).unwrap_or(0) as u32);
+    f.row("Use the cookies of this browser", &cookie_dd);
     notebook.append_page(&f.page(), Some(&gtk::Label::new(Some("Downloads"))));
 
     // ---------------- Connection ----------------
@@ -450,6 +456,7 @@ pub fn open(ui: &Rc<Ui>) {
             let command = post.text().trim().to_string();
             s.post_command = (!command.is_empty()).then_some(command);
             s.proxy = proxy;
+            s.ytdlp_cookies_browser = cookie_browsers.get(cookie_dd.selected() as usize).copied().flatten().map(str::to_string);
             s.site_logins = logins.borrow().clone();
             if let Err(e) = s.validate() {
                 status.set_text(&e);

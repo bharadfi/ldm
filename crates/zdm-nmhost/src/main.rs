@@ -83,7 +83,7 @@ async fn handle(payload: &[u8]) -> Value {
     let req = match parse_message(&v) {
         Ok(Msg::Ping) => Request::Ping,
         Ok(Msg::Add(a)) => Request::Add(a),
-        Ok(Msg::Formats { url }) => Request::Formats { url },
+        Ok(Msg::Formats { url, cookie }) => Request::Formats { url, cookie },
         Err(e) => return err(e),
     };
     match send(req).await {

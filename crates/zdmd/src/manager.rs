@@ -51,6 +51,7 @@ fn load_settings(cfg: &Config) -> Settings {
         on_exists: "rename".into(),
         category_exts: Default::default(),
         site_logins: vec![],
+        ytdlp_cookies_browser: None,
     };
     std::fs::read(settings_path(cfg)).ok().and_then(|b| serde_json::from_slice::<Settings>(&b).ok()).filter(|s| s.validate().is_ok()).unwrap_or(defaults)
 }
@@ -105,7 +106,7 @@ const RETRY_PREFIX: &str = "Will retry (attempt";
 /// Network trouble that may go away (worth retrying) versus errors that will not fix themselves.
 pub fn is_transient(msg: &str) -> bool {
     let m = msg.to_ascii_lowercase();
-    const FINAL: [&str; 20] = ["video unavailable", "is private", "sign in", "unsupported url", "requested format", "needs yt-dlp", "unsupported format", "no downloadable", "needs ffmpeg", "already exists", "only http", "bad proxy", "bad header", "bad credentials", "no such", "live stream", "unsupported", "could not decrypt", "not a web page", "is not a valid"];
+    const FINAL: [&str; 21] = ["proof that this is not a robot", "video unavailable", "is private", "sign in", "unsupported url", "requested format", "needs yt-dlp", "unsupported format", "no downloadable", "needs ffmpeg", "already exists", "only http", "bad proxy", "bad header", "bad credentials", "no such", "live stream", "unsupported", "could not decrypt", "not a web page", "is not a valid"];
     if FINAL.iter().any(|k| m.contains(k)) {
         return false;
     }
@@ -197,11 +198,12 @@ impl Manager {
     }
 
     /// What a video page offers, through yt-dlp.
-    pub async fn formats(&self, url: &str) -> Result<zdm_proto::FormatList> {
+    pub async fn formats(&self, url: &str, cookie: Option<&str>) -> Result<zdm_proto::FormatList> {
         if !(url.starts_with("http://") || url.starts_with("https://")) {
             bail!("only http:// and https:// pages can be looked up");
         }
-        crate::ytdlp::list_formats(url, self.settings().proxy.as_deref()).await
+        let s = self.settings();
+        crate::ytdlp::list_formats(url, s.proxy.as_deref(), cookie, s.ytdlp_cookies_browser.as_deref()).await
     }
 
     /// Look for downloadable files on a page. Uses the proxy from the settings.
@@ -710,7 +712,7 @@ impl Manager {
         let headers: Vec<(String, String)> = opts.headers.clone();
         let this = self.clone();
         let done = crate::ytdlp::download(
-            crate::ytdlp::YtdlpJob { page_url: &row.info.url, selector: sel, dest: &dest, proxy: set.proxy.as_deref(), referer: opts.referer.as_deref(), user_agent: row.user_agent.as_deref(), headers: &headers, limit_kib, cancel },
+            crate::ytdlp::YtdlpJob { page_url: &row.info.url, selector: sel, dest: &dest, proxy: set.proxy.as_deref(), referer: opts.referer.as_deref(), user_agent: row.user_agent.as_deref(), headers: &headers, limit_kib, cookie_browser: set.ytdlp_cookies_browser.as_deref(), cancel },
             move |d, t| {
                 let s = this.store();
                 let _ = s.set_downloaded(id, d);

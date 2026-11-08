@@ -105,7 +105,7 @@ pub fn open(ui: &Rc<Ui>, prefill: Option<&str>) {
             if let Some(v) = &*u.video.borrow() {
                 *v.url.borrow_mut() = address.clone();
             }
-            send(&u, Request::Formats { url: address });
+            send(&u, Request::Formats { url: address, cookie: None });
         };
         let go2 = go.clone();
         look_up.connect_clicked(move |_| go());

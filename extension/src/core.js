@@ -106,6 +106,13 @@ export function buildAddMessage({ url, referer, cookie, userAgent, filename, for
   return msg;
 }
 
+/** The question "what can be downloaded from this page?" for the native helper, with the page's cookies attached. */
+export function buildFormatsMessage({ url, cookie }) {
+  const msg = { type: 'formats', url };
+  if (cookie) msg.cookie = cookie;
+  return msg;
+}
+
 export function parseExcludedHosts(text) {
   return String(text)
     .split(/[\s,]+/)

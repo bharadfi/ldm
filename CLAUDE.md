@@ -123,4 +123,8 @@ so ALL candidates are asked `--version` and the newest wins (cached 10 min); err
 (`explainError`) instead of a vague "nothing found". REAL end-to-end test recipe (works, found two bugs): start `brave --headless=new --remote-debugging-port=9333
 --user-data-dir=<tmp> --load-extension=extension/dist/chrome --disable-features=DisableLoadExtensionCommandLineSwitch`, copy the NativeMessagingHosts manifest into `<tmp>/NativeMessagingHosts/`,
 drive it over CDP with python `websockets` (service-worker `chrome.runtime.sendNativeMessage`, page hover/click via `Input.dispatchMouseEvent`, `Page.captureScreenshot`).
+YouTube "Sign in to confirm you're not a bot": it is an IP/behaviour rate limit (hit by our own many test lookups), not a bug; even a fresh anonymous browser session did not lift it.
+Mitigations built: formats cache (10 min), `Request::Formats{cookie}` (the extension sends the page's cookies; written to a private 0600 temp cookie file, deleted after),
+`Settings.ytdlp_cookies_browser` (Options > Downloads: yt-dlp `--cookies-from-browser`), a plain-words message, and the bot-check is NOT auto-retried.
+Do not hammer YouTube in tests; the suite uses a fake yt-dlp. Reading a user's real browser cookies for a test is refused by the harness (credential access): don't.
 
