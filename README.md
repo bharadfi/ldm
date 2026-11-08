@@ -63,10 +63,10 @@ Download managers such as Internet Download Manager and Ant Download Manager are
 
 ### Option 1: the `.deb` package (recommended)
 
-Download `linux-download-manager_0.1.9_amd64.deb` from the [Releases page](../../releases), then:
+Download `linux-download-manager_0.1.10_amd64.deb` from the [Releases page](../../releases), then:
 
 ```bash
-sudo apt install ./linux-download-manager_0.1.9_amd64.deb
+sudo apt install ./linux-download-manager_0.1.10_amd64.deb
 ```
 
 Optional but recommended (video sites and streams):
@@ -87,9 +87,9 @@ cargo build --release
 
 ## Connect your browser
 
-1. Start LDM and open **Options > General**. Each browser has a row showing whether the extension is installed.
+1. Start LDM and open **Options > General**. Each browser has a row with Install and Remove buttons.
 2. Tick your browser (this lets it talk to LDM) and press OK.
-3. Press **Install** next to a Chrome-family browser (Chrome, Chromium, Brave, Brave Origin, Edge). If the browser is open, restart it; it then asks you to confirm the new extension.
+3. Press **Install** next to a Chrome-family browser (Chrome, Chromium, Brave, Brave Origin, Edge). LDM opens the browser's extensions page and the extension folder: switch on *Developer mode*, press *Load unpacked* and choose that folder. (A one-click "Add extension?" prompt needs the extension to be published in the Chrome Web Store, which it is not yet.) **Remove** opens the extension's page so you can press Remove there.
 4. **Firefox:** the add-on is not signed by Mozilla yet, so **Install** works only in **Firefox Developer Edition or Nightly**, and only after you open `about:config` and set `xpinstall.signatures.required` to `false`. Regular Firefox refuses it (use *Load Temporary Add-on* in `about:debugging` there).
 5. Click a download link. LDM takes over. Settings for the on-page video button and the keys that force or block a takeover are in the extension's popup (the **Open extension settings** button in Options opens it).
 

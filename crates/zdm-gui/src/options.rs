@@ -185,29 +185,22 @@ pub fn open(ui: &Rc<Ui>) {
     // ---------------- General ----------------
     let mut f = Form::new();
     f.heading("Browser and system integration");
-    f.note("Tick a browser to let it talk to this program, then press Install: the browser opens and asks you to confirm (if it was already open, restart it first). Remove takes you to the extension's page in the browser, where you choose Remove there. ");
+    f.note("Tick a browser to let it talk to this program. Install opens the browser's extensions page and the extension folder: switch on Developer mode, press Load unpacked and choose that folder (a one-click prompt like the Web Store's needs the extension to be published there, which it is not yet). Remove takes you to the extension's page in the browser, where you press Remove. ");
     f.note("Firefox: this add-on is not signed by Mozilla yet, so Install works only in Firefox Developer Edition or Nightly, and only after you open about:config and set xpinstall.signatures.required to false. Regular Firefox will refuse it.");
     let statuses = browser_status();
     let browser_checks: Vec<(String, bool, gtk::CheckButton)> = statuses
         .iter()
-        .map(|(name, registered, found, ext, ext_id)| {
+        .map(|(name, registered, found, _ext, ext_id)| {
             let cb = check(&format!("Capture downloads from {} ({})", browser_title(name), if *found { "installed" } else { "not found" }), *registered);
             cb.set_hexpand(true);
-            let text = if !*found {
-                "Browser not installed"
-            } else {
-                match ext.as_str() {
-                    "installed" => "Extension installed",
-                    "disabled" => "Extension turned off",
-                    _ => "Extension not installed",
-                }
-            };
+            // Whether the extension is really in the browser cannot be told reliably from outside (the browser's own
+            // files lag behind and keep leftovers), so only the browser's presence is reported.
+            let text = if !*found { "Browser not installed" } else { "Check in the browser" };
             let state = gtk::Label::builder().label(text).css_classes(["dim-label"]).build();
-            let firefox = name == "firefox";
-            let install = gtk::Button::with_label(if firefox { "Install" } else if ext == "installed" { "Reinstall" } else { "Install" });
+            let install = gtk::Button::with_label("Install");
             install.set_sensitive(*found);
             let remove = gtk::Button::with_label("Remove");
-            remove.set_sensitive(*found && ext != "missing");
+            remove.set_sensitive(*found);
             let (n, st) = (name.clone(), state.clone());
             install.connect_clicked(move |b| {
                 if n == "firefox" {
@@ -222,14 +215,15 @@ pub fn open(ui: &Rc<Ui>) {
                     }
                     return;
                 }
-                let ok = nmhost().map(|e| std::process::Command::new(e).args(["ext-install", "--browser", &n]).output().is_ok_and(|o| o.status.success())).unwrap_or(false);
-                if ok {
-                    st.set_label("Restart the browser, then confirm");
-                    b.set_sensitive(false);
-                    launch_browser(&n, &format!("{}://extensions", browser_scheme(&n)));
-                } else {
-                    st.set_label("Could not prepare the install");
+                // Browsers install extensions without a store listing only from a folder the user picks: open the
+                // browser on its extensions page and the folder, so the steps are Developer mode > Load unpacked > pick it.
+                let dir = ["/usr/share/linux-download-manager/chrome", "extension/dist/chrome"].into_iter().map(std::path::PathBuf::from).find(|d| d.is_dir());
+                if let Some(d) = dir {
+                    let _ = gtk::gio::AppInfo::launch_default_for_uri(&format!("file://{}", d.display()), None::<&gtk::gio::AppLaunchContext>);
                 }
+                launch_browser(&n, &format!("{}://extensions", browser_scheme(&n)));
+                st.set_label("Developer mode > Load unpacked > choose the folder");
+                b.set_sensitive(false);
             });
             // Removing is done in the browser itself: take the user to the extension's page there.
             let (n, id) = (name.clone(), ext_id.clone());
