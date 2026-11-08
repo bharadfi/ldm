@@ -67,6 +67,10 @@ pub struct AddRequest {
     /// (by default the existing task is returned, and resumed if it was stopped).
     #[serde(default)]
     pub allow_duplicate: bool,
+    /// For a video page: what to fetch with yt-dlp, as given by a `FormatOption::id` from `Request::Formats`.
+    /// The task's link is then the page address, and `filename` should be the option's suggested name.
+    #[serde(default)]
+    pub ytdlp: Option<String>,
     /// Name and password for sites that ask for Basic or Digest login. (`http://user:pass@host/…` links work too.)
     /// Kept in the daemon's private database, never shown in the task list.
     #[serde(default)]
@@ -161,6 +165,31 @@ pub struct GrabLink {
     pub ext: String,
     /// The page it was found on.
     pub from: String,
+}
+
+/// One thing that can be downloaded from a video page (a resolution, an audio track, subtitles).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct FormatOption {
+    /// What to put in `AddRequest::ytdlp`.
+    pub id: String,
+    /// `video`, `audio` or `subtitle`.
+    pub kind: String,
+    /// Text for a menu row, for example `MP4 file, quality 1080p HD`.
+    pub label: String,
+    pub ext: String,
+    pub height: Option<u32>,
+    /// Expected download size in bytes (an estimate), when known.
+    pub size: Option<u64>,
+    /// File name to save under (use it as `AddRequest::filename`).
+    pub filename: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct FormatList {
+    pub title: String,
+    /// Length in seconds, when known.
+    pub duration: Option<f64>,
+    pub options: Vec<FormatOption>,
 }
 
 /// Daemon-wide settings, editable from the Options dialog and saved by the daemon.
@@ -298,6 +327,8 @@ pub enum Request {
     SetAfterAll(AfterAll),
     /// Crawl for files (can take a while; answered with `Links`).
     Grab(GrabRequest),
+    /// What can be downloaded from a video page (asks yt-dlp; can take ten seconds; answered with `Formats`).
+    Formats { url: String },
     Ping,
 }
 
@@ -312,6 +343,7 @@ pub enum Response {
     Settings(Settings),
     AfterAll(AfterAll),
     Links { links: Vec<GrabLink> },
+    Formats(FormatList),
     Error { message: String },
 }
 

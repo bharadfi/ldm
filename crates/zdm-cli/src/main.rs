@@ -43,7 +43,12 @@ enum Cmd {
         /// Add it even if the same link is already in the list
         #[arg(long)]
         again: bool,
+        /// For a video page: the id of a choice from `zdm formats` (with --filename for the saved name)
+        #[arg(long)]
+        format: Option<String>,
     },
+    /// List what can be downloaded from a video page (YouTube and many other sites, through yt-dlp)
+    Formats { url: String },
     /// Look for downloadable files on a web page
     Grab {
         url: String,
@@ -269,9 +274,19 @@ async fn get(a: GetArgs) -> Result<()> {
 async fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Get(a) => get(a).await,
-        Cmd::Add { url, filename, dest_dir, queue, referer, user_agent, headers, paused, user, again } => {
+        Cmd::Formats { url } => {
+            if let Response::Formats(l) = call(&Request::Formats { url }).await? {
+                println!("{}", l.title);
+                for o in &l.options {
+                    let size = o.size.map_or(String::new(), |s| format!("  ~{:.1} MB", s as f64 / 1e6));
+                    println!("  {:<14} {:<9} {}{}", o.id, o.kind, o.label, size);
+                }
+            }
+            Ok(())
+        }
+        Cmd::Add { url, filename, dest_dir, queue, referer, user_agent, headers, paused, user, again, format } => {
             let auth = user.map(|u| u.split_once(':').map_or((u.clone(), String::new()), |(a, b)| (a.to_string(), b.to_string())));
-            let req = AddRequest { url, filename, dest_dir, queue, referer, user_agent, headers: parse_headers(&headers)?, start: !paused, allow_duplicate: again, auth };
+            let req = AddRequest { url, filename, dest_dir, queue, referer, user_agent, headers: parse_headers(&headers)?, start: !paused, allow_duplicate: again, auth, ytdlp: format };
             let r = call(&Request::Add(req)).await?;
             if let Response::Task(t) = r {
                 print_task(&t);

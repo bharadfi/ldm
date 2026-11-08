@@ -1,0 +1,305 @@
+{
+ "id": "aqz-KE-bpKQ",
+ "title": "Big Buck Bunny 60fps 4K - Official Blender Foundation Short Film",
+ "duration": 635,
+ "language": "en",
+ "formats": [
+  {
+   "format_id": "sb0",
+   "ext": "mhtml",
+   "height": 180,
+   "width": 320,
+   "fps": 0.2015748031496063,
+   "vcodec": "none",
+   "acodec": "none",
+   "filesize": null,
+   "filesize_approx": null,
+   "abr": 0,
+   "tbr": null,
+   "protocol": "mhtml",
+   "format_note": "storyboard"
+  },
+  {
+   "format_id": "233",
+   "ext": "mp4",
+   "height": null,
+   "width": null,
+   "fps": null,
+   "vcodec": "none",
+   "acodec": null,
+   "filesize": null,
+   "filesize_approx": null,
+   "abr": null,
+   "tbr": null,
+   "protocol": "m3u8_native",
+   "format_note": "Default, low"
+  },
+  {
+   "format_id": "139",
+   "ext": "m4a",
+   "height": null,
+   "width": null,
+   "fps": null,
+   "vcodec": "none",
+   "acodec": "mp4a.40.5",
+   "filesize": 3871021,
+   "filesize_approx": 3870998,
+   "abr": 48.792,
+   "tbr": 48.792,
+   "protocol": "https",
+   "format_note": "low"
+  },
+  {
+   "format_id": "250",
+   "ext": "webm",
+   "height": null,
+   "width": null,
+   "fps": null,
+   "vcodec": "none",
+   "acodec": "opus",
+   "filesize": 5186043,
+   "filesize_approx": 5186038,
+   "abr": 65.377,
+   "tbr": 65.377,
+   "protocol": "https",
+   "format_note": "low"
+  },
+  {
+   "format_id": "140-drc",
+   "ext": "m4a",
+   "height": null,
+   "width": null,
+   "fps": null,
+   "vcodec": "none",
+   "acodec": "mp4a.40.2",
+   "filesize": 10271496,
+   "filesize_approx": 10271468,
+   "abr": 129.481,
+   "tbr": 129.481,
+   "protocol": "https",
+   "format_note": "medium, DRC"
+  },
+  {
+   "format_id": "140",
+   "ext": "m4a",
+   "height": null,
+   "width": null,
+   "fps": null,
+   "vcodec": "none",
+   "acodec": "mp4a.40.2",
+   "filesize": 10271496,
+   "filesize_approx": 10271468,
+   "abr": 129.481,
+   "tbr": 129.481,
+   "protocol": "https",
+   "format_note": "medium"
+  },
+  {
+   "format_id": "251",
+   "ext": "webm",
+   "height": null,
+   "width": null,
+   "fps": null,
+   "vcodec": "none",
+   "acodec": "opus",
+   "filesize": 10202210,
+   "filesize_approx": 10202162,
+   "abr": 128.612,
+   "tbr": 128.612,
+   "protocol": "https",
+   "format_note": "medium"
+  },
+  {
+   "format_id": "160",
+   "ext": "mp4",
+   "height": 144,
+   "width": 256,
+   "fps": 30,
+   "vcodec": "avc1.4D400C",
+   "acodec": "none",
+   "filesize": 4323893,
+   "filesize_approx": 4323853,
+   "abr": 0,
+   "tbr": 54.511,
+   "protocol": "https",
+   "format_note": "144p"
+  },
+  {
+   "format_id": "133",
+   "ext": "mp4",
+   "height": 240,
+   "width": 426,
+   "fps": 30,
+   "vcodec": "avc1.4D4015",
+   "acodec": "none",
+   "filesize": 9323483,
+   "filesize_approx": 9323440,
+   "abr": 0,
+   "tbr": 117.541,
+   "protocol": "https",
+   "format_note": "240p"
+  },
+  {
+   "format_id": "134",
+   "ext": "mp4",
+   "height": 360,
+   "width": 640,
+   "fps": 30,
+   "vcodec": "avc1.4D401E",
+   "acodec": "none",
+   "filesize": 18294110,
+   "filesize_approx": 18294061,
+   "abr": 0,
+   "tbr": 230.634,
+   "protocol": "https",
+   "format_note": "360p"
+  },
+  {
+   "format_id": "135",
+   "ext": "mp4",
+   "height": 480,
+   "width": 854,
+   "fps": 30,
+   "vcodec": "avc1.4D401F",
+   "acodec": "none",
+   "filesize": 28207144,
+   "filesize_approx": 28207093,
+   "abr": 0,
+   "tbr": 355.608,
+   "protocol": "https",
+   "format_note": "480p"
+  },
+  {
+   "format_id": "298",
+   "ext": "mp4",
+   "height": 720,
+   "width": 1280,
+   "fps": 60,
+   "vcodec": "avc1.4D4020",
+   "acodec": "none",
+   "filesize": 150524867,
+   "filesize_approx": 150524845,
+   "abr": 0,
+   "tbr": 1897.673,
+   "protocol": "https",
+   "format_note": "720p60"
+  },
+  {
+   "format_id": "299",
+   "ext": "mp4",
+   "height": 1080,
+   "width": 1920,
+   "fps": 60,
+   "vcodec": "avc1.64002A",
+   "acodec": "none",
+   "filesize": 257619653,
+   "filesize_approx": 257619597,
+   "abr": 0,
+   "tbr": 3247.821,
+   "protocol": "https",
+   "format_note": "1080p60"
+  },
+  {
+   "format_id": "303",
+   "ext": "webm",
+   "height": 1080,
+   "width": 1920,
+   "fps": 60,
+   "vcodec": "vp9",
+   "acodec": "none",
+   "filesize": 168736189,
+   "filesize_approx": 168736175,
+   "abr": 0,
+   "tbr": 2127.264,
+   "protocol": "https",
+   "format_note": "1080p60"
+  },
+  {
+   "format_id": "399",
+   "ext": "mp4",
+   "height": 1080,
+   "width": 1920,
+   "fps": 60,
+   "vcodec": "av01.0.09M.08",
+   "acodec": "none",
+   "filesize": 124386876,
+   "filesize_approx": 124386834,
+   "abr": 0,
+   "tbr": 1568.15,
+   "protocol": "https",
+   "format_note": "1080p60"
+  },
+  {
+   "format_id": "315",
+   "ext": "webm",
+   "height": 2160,
+   "width": 3840,
+   "fps": 60,
+   "vcodec": "vp9",
+   "acodec": "none",
+   "filesize": 1362269481,
+   "filesize_approx": 1362269472,
+   "abr": 0,
+   "tbr": 17174.188,
+   "protocol": "https",
+   "format_note": "2160p60"
+  },
+  {
+   "format_id": "401",
+   "ext": "mp4",
+   "height": 2160,
+   "width": 3840,
+   "fps": 60,
+   "vcodec": "av01.0.13M.08",
+   "acodec": "none",
+   "filesize": 712445280,
+   "filesize_approx": 712445254,
+   "abr": 0,
+   "tbr": 8981.827,
+   "protocol": "https",
+   "format_note": "2160p60"
+  },
+  {
+   "format_id": "18",
+   "ext": "mp4",
+   "height": 360,
+   "width": 640,
+   "fps": 30,
+   "vcodec": "avc1.42001E",
+   "acodec": "mp4a.40.2",
+   "filesize": 21000000,
+   "filesize_approx": null,
+   "abr": 96,
+   "tbr": null,
+   "protocol": "https",
+   "format_note": "360p"
+  }
+ ],
+ "subtitles": {
+  "en": [
+   {
+    "ext": "vtt",
+    "name": "English"
+   }
+  ],
+  "hi": [
+   {
+    "ext": "vtt",
+    "name": "Hindi"
+   }
+  ]
+ },
+ "automatic_captions": {
+  "en": [
+   {
+    "ext": "ttml",
+    "name": "English"
+   }
+  ],
+  "fr": [
+   {
+    "ext": "ttml"
+   }
+  ]
+ }
+}

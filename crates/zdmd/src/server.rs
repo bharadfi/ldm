@@ -39,6 +39,7 @@ pub async fn dispatch(m: &Arc<Manager>, req: Request) -> Response {
                 Response::Ok
             }
             Request::Grab(g) => Response::Links { links: m.grab(g).await? },
+            Request::Formats { url } => Response::Formats(m.formats(&url).await?),
             Request::MoveToTop { id } => {
                 m.move_to_top(id)?;
                 Response::Ok

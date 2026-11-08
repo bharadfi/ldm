@@ -83,6 +83,8 @@ fn hls_stem(url: &str) -> String {
 
 /// Header name under which a task's credentials are kept with its other (stored, private) request headers.
 const AUTH_HEADER: &str = "x-zdm-userinfo";
+/// Header name under which a video-page task keeps what to fetch with yt-dlp.
+const YTDLP_HEADER: &str = "x-zdm-ytdlp";
 
 /// `http://user:pass@host/x` -> (`http://host/x`, Some((user, pass))). Any other string comes back unchanged.
 pub fn split_userinfo(url: &str) -> (String, Option<(String, String)>) {
@@ -102,7 +104,7 @@ const RETRY_PREFIX: &str = "Will retry (attempt";
 /// Network trouble that may go away (worth retrying) versus errors that will not fix themselves.
 pub fn is_transient(msg: &str) -> bool {
     let m = msg.to_ascii_lowercase();
-    const FINAL: [&str; 12] = ["needs ffmpeg", "already exists", "only http", "bad proxy", "bad header", "bad credentials", "no such", "live stream", "unsupported", "could not decrypt", "not a web page", "is not a valid"];
+    const FINAL: [&str; 20] = ["video unavailable", "is private", "sign in", "unsupported url", "requested format", "needs yt-dlp", "unsupported format", "no downloadable", "needs ffmpeg", "already exists", "only http", "bad proxy", "bad header", "bad credentials", "no such", "live stream", "unsupported", "could not decrypt", "not a web page", "is not a valid"];
     if FINAL.iter().any(|k| m.contains(k)) {
         return false;
     }
@@ -177,6 +179,14 @@ impl Manager {
         self.global.set_rate(s.global_limit_kib * 1024);
         *self.settings.lock().unwrap() = s;
         Ok(())
+    }
+
+    /// What a video page offers, through yt-dlp.
+    pub async fn formats(&self, url: &str) -> Result<zdm_proto::FormatList> {
+        if !(url.starts_with("http://") || url.starts_with("https://")) {
+            bail!("only http:// and https:// pages can be looked up");
+        }
+        crate::ytdlp::list_formats(url, self.settings().proxy.as_deref()).await
     }
 
     /// Look for downloadable files on a page. Uses the proxy from the settings.
@@ -325,6 +335,13 @@ impl Manager {
         // credentials never stay in the visible link
         let (clean, from_url) = split_userinfo(&a.url);
         a.url = clean;
+        if let Some(sel) = a.ytdlp.take() {
+            if !crate::ytdlp::valid_selector(&sel) {
+                bail!("unsupported format selection");
+            }
+            a.headers.retain(|(k, _)| !k.eq_ignore_ascii_case(YTDLP_HEADER));
+            a.headers.push((YTDLP_HEADER.into(), sel));
+        }
         if let Some((u, p)) = a.auth.take().or(from_url) {
             a.headers.retain(|(k, _)| !k.eq_ignore_ascii_case(AUTH_HEADER));
             a.headers.push((AUTH_HEADER.into(), format!("{}:{}", u.replace(':', "%3A"), p)));
@@ -335,7 +352,10 @@ impl Manager {
             }
         }
         if !a.allow_duplicate {
-            let existing = self.store().tasks()?.into_iter().find(|t| t.info.url == a.url && t.info.state != State::Completed);
+            // the same page with another format (1080p and the audio, say) is a different download
+            let sel = |hs: &[(String, String)]| hs.iter().find(|(k, _)| k.eq_ignore_ascii_case(YTDLP_HEADER)).map(|(_, v)| v.clone());
+            let wanted = sel(&a.headers);
+            let existing = self.store().tasks()?.into_iter().find(|t| t.info.url == a.url && t.info.state != State::Completed && sel(&t.headers) == wanted);
             if let Some(t) = existing {
                 if a.start && matches!(t.info.state, State::Paused | State::Failed) {
                     self.resume(t.info.id)?;
@@ -416,6 +436,7 @@ impl Manager {
                     let _ = std::fs::remove_file(p);
                 }
                 let _ = std::fs::remove_dir_all(sibling(&d, ".hls"));
+                let _ = std::fs::remove_dir_all(sibling(&d, ".ytdlp"));
             }
         }
         self.wake.notify_one();
@@ -610,6 +631,7 @@ impl Manager {
         // stored credentials: Basic is sent at once, Digest is answered when the server asks for it
         let mut headers = row.headers.clone();
         let userinfo = headers.iter().position(|(k, _)| k.eq_ignore_ascii_case(AUTH_HEADER)).map(|i| headers.remove(i).1);
+        headers.retain(|(k, _)| !k.eq_ignore_ascii_case(YTDLP_HEADER)); // ours, not a request header
         let auth = userinfo.and_then(|v| v.split_once(':').map(|(u, p)| (u.replace("%3A", ":"), p.to_string())));
         let mut opts = Options {
             auth: auth.clone(),
@@ -625,6 +647,9 @@ impl Manager {
         };
         if let Some(ua) = &row.user_agent {
             opts.user_agent = ua.clone();
+        }
+        if let Some(sel) = row.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(YTDLP_HEADER)).map(|(_, v)| v.clone()) {
+            return self.execute_ytdlp(id, &row, &sel, &opts, &set, cancel).await;
         }
         let client = build_client(&opts)?;
         if zdm_core::ftp::is_ftp_url(&row.info.url) {
@@ -652,6 +677,39 @@ impl Manager {
             let _ = this.store().set_downloaded(id, done);
         })
         .await
+    }
+
+    /// A video page: yt-dlp fetches the chosen format (and joins video + audio with ffmpeg).
+    async fn execute_ytdlp(self: &Arc<Self>, id: i64, row: &crate::store::TaskRow, sel: &str, opts: &Options, set: &Settings, cancel: &CancellationToken) -> Result<()> {
+        let dest = match &row.info.dest {
+            Some(d) => PathBuf::from(d),
+            None => {
+                let name = row.info.filename.clone().unwrap_or_else(|| "video.mp4".into());
+                self.choose_dest(id, &name, row.dest_dir.as_deref(), None)?
+            }
+        };
+        let queue_limit = self.store().queue(&row.info.queue).ok().flatten().map_or(0, |q| q.limit_kib);
+        // yt-dlp is a separate program, so the shared limiters cannot pace it: give it the strictest cap
+        let limit_kib = [set.speed_limit_kib, set.global_limit_kib, queue_limit].into_iter().filter(|k| *k > 0).min().unwrap_or(0);
+        let headers: Vec<(String, String)> = opts.headers.clone();
+        let this = self.clone();
+        let done = crate::ytdlp::download(
+            crate::ytdlp::YtdlpJob { page_url: &row.info.url, selector: sel, dest: &dest, proxy: set.proxy.as_deref(), referer: opts.referer.as_deref(), user_agent: row.user_agent.as_deref(), headers: &headers, limit_kib, cancel },
+            move |d, t| {
+                let s = this.store();
+                let _ = s.set_downloaded(id, d);
+                if t > 0 {
+                    let _ = s.set_size(id, Some(t));
+                }
+            },
+        )
+        .await?;
+        let len = std::fs::metadata(&done)?.len();
+        let name = done.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let s = self.store();
+        s.set_meta(id, &name, &done.to_string_lossy(), &categorize_with(&name, &self.settings().category_exts), Some(len))?;
+        s.set_downloaded(id, len)?;
+        Ok(())
     }
 
     /// An `ftp://` file: one resumable stream.
