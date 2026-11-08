@@ -54,7 +54,8 @@ Download managers such as Internet Download Manager and Ant Download Manager are
 |---|---|
 | Brave (deb) | Verified |
 | Brave Origin | Supported |
-| Firefox (Mozilla deb/apt build) | Verified |
+| Firefox Developer Edition / Nightly | Install button (needs `xpinstall.signatures.required` = false); not tested |
+| Firefox (Mozilla deb/apt build) | Verified with a temporary add-on |
 | Google Chrome, Chromium (deb), Microsoft Edge | Same extension code as Brave; not tested |
 | Firefox **snap**, and any snap or Flatpak browser | Not supported (sandbox blocks the helper) |
 
@@ -62,10 +63,10 @@ Download managers such as Internet Download Manager and Ant Download Manager are
 
 ### Option 1: the `.deb` package (recommended)
 
-Download `linux-download-manager_0.1.8_amd64.deb` from the [Releases page](../../releases), then:
+Download `linux-download-manager_0.1.9_amd64.deb` from the [Releases page](../../releases), then:
 
 ```bash
-sudo apt install ./linux-download-manager_0.1.8_amd64.deb
+sudo apt install ./linux-download-manager_0.1.9_amd64.deb
 ```
 
 Optional but recommended (video sites and streams):
@@ -89,7 +90,7 @@ cargo build --release
 1. Start LDM and open **Options > General**. Each browser has a row showing whether the extension is installed.
 2. Tick your browser (this lets it talk to LDM) and press OK.
 3. Press **Install** next to a Chrome-family browser (Chrome, Chromium, Brave, Brave Origin, Edge). If the browser is open, restart it; it then asks you to confirm the new extension.
-4. **Firefox** only accepts add-ons signed by Mozilla, which LDM does not have yet. Use **Open folder**, then in `about:debugging` choose *This Firefox*, *Load Temporary Add-on* and select `manifest.json` in `firefox/` (it is removed when Firefox closes).
+4. **Firefox:** the add-on is not signed by Mozilla yet, so **Install** works only in **Firefox Developer Edition or Nightly**, and only after you open `about:config` and set `xpinstall.signatures.required` to `false`. Regular Firefox refuses it (use *Load Temporary Add-on* in `about:debugging` there).
 5. Click a download link. LDM takes over. Settings for the on-page video button and the keys that force or block a takeover are in the extension's popup (the **Open extension settings** button in Options opens it).
 
 ## How to use

@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parent
 SRC = ROOT / "src"
 DIST = ROOT / "dist"
 
-VERSION = "0.1.8"
+VERSION = "0.1.9"
 # Public half of the extension signing key (the private half stays on the maintainer's computer): pins the Chromium extension ID so the native-messaging manifest can
 # allow exactly this extension. Must match CHROME_EXTENSION_ID in crates/zdm-nmhost/src/lib.rs.
 CHROME_KEY = (
@@ -154,6 +154,8 @@ def main():
         if "--zip" in sys.argv:
             z = shutil.make_archive(str(DIST / f"zdm-{t}"), "zip", out)
             print(f"zipped {z}")
+            if t == "firefox":
+                shutil.copy(z, DIST / "ldm.xpi")  # same file; Firefox installs .xpi packages
         if t == "chrome" and "--crx" in sys.argv:
             pem = os.environ.get("LDM_CRX_KEY") or os.path.expanduser("~/.local/share/ldm-signing/extension.pem")
             z = shutil.make_archive(str(DIST / "ldm-unsigned"), "zip", out)

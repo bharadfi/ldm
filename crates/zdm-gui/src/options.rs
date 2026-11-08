@@ -99,7 +99,11 @@ fn browser_program(name: &str) -> &'static str {
         "brave" => "brave-browser",
         "brave-origin" => "brave-origin",
         "edge" => "microsoft-edge",
-        _ => "firefox",
+        _ => {
+            // Developer Edition and Nightly are the Firefox builds that accept this add-on
+            let path = std::env::var_os("PATH").unwrap_or_default();
+            ["firefox-developer-edition", "firefox-nightly", "firefox-dev", "firefox"].into_iter().find(|p| std::env::split_paths(&path).any(|d| d.join(p).is_file())).unwrap_or("firefox")
+        }
     }
 }
 
@@ -181,7 +185,8 @@ pub fn open(ui: &Rc<Ui>) {
     // ---------------- General ----------------
     let mut f = Form::new();
     f.heading("Browser and system integration");
-    f.note("Tick a browser to let it talk to this program, then press Install: the browser opens and asks you to confirm (if it was already open, restart it first). Remove takes you to the extension's page in the browser, where you choose Remove there. Firefox only accepts add-ons signed by Mozilla, so for now it needs the manual route (Open the extension folder, then about:debugging > Load Temporary Add-on).");
+    f.note("Tick a browser to let it talk to this program, then press Install: the browser opens and asks you to confirm (if it was already open, restart it first). Remove takes you to the extension's page in the browser, where you choose Remove there. ");
+    f.note("Firefox: this add-on is not signed by Mozilla yet, so Install works only in Firefox Developer Edition or Nightly, and only after you open about:config and set xpinstall.signatures.required to false. Regular Firefox will refuse it.");
     let statuses = browser_status();
     let browser_checks: Vec<(String, bool, gtk::CheckButton)> = statuses
         .iter()
@@ -199,18 +204,22 @@ pub fn open(ui: &Rc<Ui>) {
             };
             let state = gtk::Label::builder().label(text).css_classes(["dim-label"]).build();
             let firefox = name == "firefox";
-            let install = gtk::Button::with_label(if firefox { "Open folder" } else if ext == "installed" { "Reinstall" } else { "Install" });
+            let install = gtk::Button::with_label(if firefox { "Install" } else if ext == "installed" { "Reinstall" } else { "Install" });
             install.set_sensitive(*found);
             let remove = gtk::Button::with_label("Remove");
             remove.set_sensitive(*found && ext != "missing");
             let (n, st) = (name.clone(), state.clone());
             install.connect_clicked(move |b| {
                 if n == "firefox" {
-                    let dir = ["/usr/share/linux-download-manager", "extension/dist"].into_iter().map(std::path::PathBuf::from).find(|d| d.is_dir());
-                    if let Some(d) = dir {
-                        let _ = gtk::gio::AppInfo::launch_default_for_uri(&format!("file://{}", d.display()), None::<&gtk::gio::AppLaunchContext>);
+                    // opening an .xpi makes Firefox ask whether to add it (Developer Edition / Nightly only)
+                    let xpi = ["/usr/share/linux-download-manager/ldm.xpi", "extension/dist/ldm.xpi"].into_iter().find(|p| std::path::Path::new(p).is_file());
+                    match xpi {
+                        Some(x) => {
+                            st.set_label("Confirm in Firefox");
+                            launch_browser("firefox", x);
+                        }
+                        None => st.set_label("Add-on file not found"),
                     }
-                    launch_browser("firefox", "about:debugging#/runtime/this-firefox");
                     return;
                 }
                 let ok = nmhost().map(|e| std::process::Command::new(e).args(["ext-install", "--browser", &n]).output().is_ok_and(|o| o.status.success())).unwrap_or(false);
