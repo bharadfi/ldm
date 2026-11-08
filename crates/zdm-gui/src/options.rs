@@ -153,7 +153,15 @@ pub fn open(ui: &Rc<Ui>) {
     // ---------------- General ----------------
     let mut f = Form::new();
     f.heading("Browser and system integration");
-    f.note("Each browser needs the Linux Download Manager extension (see extension/README.md) and the helper registered here.");
+    f.note("Ticking a browser registers the helper that lets it talk to this program. Browsers do not allow programs to install extensions silently, so the extension itself is added once by hand: use the button below, then in the browser's extensions page switch on Developer mode, choose Load unpacked and pick that folder (Firefox: about:debugging, Load Temporary Add-on).");
+    let open_ext = gtk::Button::with_label("Open the extension folder");
+    open_ext.connect_clicked(|_| {
+        let dir = ["/usr/share/linux-download-manager", "extension/dist"].into_iter().map(std::path::PathBuf::from).find(|d| d.is_dir());
+        if let Some(d) = dir {
+            let _ = gtk::gio::AppInfo::launch_default_for_uri(&format!("file://{}", d.display()), None::<&gtk::gio::AppLaunchContext>);
+        }
+    });
+    f.wide(&open_ext);
     let statuses = browser_status();
     let browser_checks: Vec<(String, bool, gtk::CheckButton)> = statuses
         .iter()

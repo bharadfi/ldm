@@ -309,6 +309,17 @@ pub async fn list_formats(url: &str, proxy: Option<&str>, cookie: Option<&str>, 
 }
 
 async fn list_formats_uncached(url: &str, proxy: Option<&str>, cookie: Option<&str>, cookie_browser: Option<&str>) -> Result<FormatList> {
+    match list_formats_once(url, proxy, cookie, cookie_browser).await {
+        // Signed-in requests sometimes see no usable formats where an anonymous one does (seen on finished
+        // live streams): try once more without cookies before giving up.
+        Err(e) if (cookie.is_some() || cookie_browser.is_some()) && format!("{e:#}").contains("Requested format is not available") => {
+            list_formats_once(url, proxy, None, None).await.map_err(|_| e)
+        }
+        other => other,
+    }
+}
+
+async fn list_formats_once(url: &str, proxy: Option<&str>, cookie: Option<&str>, cookie_browser: Option<&str>) -> Result<FormatList> {
     let exe = need_ytdlp()?;
     let mut cmd = tokio::process::Command::new(exe);
     cmd.args(["-J", "--no-playlist", "--no-warnings", "--no-colors"]);
