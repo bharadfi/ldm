@@ -53,6 +53,7 @@ Download managers such as Internet Download Manager and Ant Download Manager are
 | Browser | Status |
 |---|---|
 | Brave (deb) | Verified |
+| Brave Origin | Supported (helper registers under `Brave-Origin`) |
 | Firefox (Mozilla deb/apt build) | Verified |
 | Google Chrome, Chromium (deb), Microsoft Edge | Same extension code as Brave; not tested |
 | Firefox **snap**, and any snap or Flatpak browser | Not supported (sandbox blocks the helper) |

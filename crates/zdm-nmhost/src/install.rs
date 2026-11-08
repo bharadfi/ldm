@@ -34,6 +34,7 @@ const BROWSERS: &[Browser] = &[
     Browser { name: "chrome", kind: Kind::Chromium, reg_key: r"Software\Google\Chrome\NativeMessagingHost", linux_dir: ".config/google-chrome/NativeMessagingHosts" },
     Browser { name: "chromium", kind: Kind::Chromium, reg_key: r"Software\Chromium\NativeMessagingHosts", linux_dir: ".config/chromium/NativeMessagingHosts" },
     Browser { name: "brave", kind: Kind::Chromium, reg_key: r"Software\BraveSoftware\Brave-Browser\NativeMessagingHosts", linux_dir: ".config/BraveSoftware/Brave-Browser/NativeMessagingHosts" },
+    Browser { name: "brave-origin", kind: Kind::Chromium, reg_key: r"Software\BraveSoftware\Brave-Origin\NativeMessagingHosts", linux_dir: ".config/BraveSoftware/Brave-Origin/NativeMessagingHosts" },
     Browser { name: "edge", kind: Kind::Chromium, reg_key: r"Software\Microsoft\Edge\NativeMessagingHosts", linux_dir: ".config/microsoft-edge/NativeMessagingHosts" },
     Browser { name: "firefox", kind: Kind::Firefox, reg_key: r"Software\Mozilla\NativeMessagingHosts", linux_dir: ".mozilla/native-messaging-hosts" },
 ];
@@ -94,6 +95,7 @@ fn program_names(browser: &str) -> &'static [&'static str] {
         "chrome" => &["google-chrome", "google-chrome-stable"],
         "chromium" => &["chromium", "chromium-browser"],
         "brave" => &["brave-browser", "brave"],
+        "brave-origin" => &["brave-origin", "brave-origin-stable"],
         "edge" => &["microsoft-edge", "microsoft-edge-stable"],
         "firefox" => &["firefox"],
         _ => &[],

@@ -108,6 +108,7 @@ fn browser_title(name: &str) -> &str {
         "chrome" => "Google Chrome",
         "chromium" => "Chromium",
         "brave" => "Brave",
+        "brave-origin" => "Brave Origin",
         "edge" => "Microsoft Edge",
         "firefox" => "Mozilla Firefox",
         other => other,
