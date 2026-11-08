@@ -113,4 +113,9 @@ Extension: `src/content.js` is a plain script; `build.py` prepends core.js (with
 Visual check recipe: `gtk4-broadwayd :5`, run the GUI with `GDK_BACKEND=broadway BROADWAY_DISPLAY=:5 LDM_NO_TRAY=1`, open http://127.0.0.1:8085/ in the built-in browser
 (resize the viewport to 1280x720; click coordinates are in the scaled screenshot frame but menus are unreliable to click there, use `zoom` for detail).
 Window look: `look.rs` (dark mode, font, toolbar, columns; prefs in `gui.json`), compact CSS block at the end of `style.css`. Self-test sets `XDG_CONFIG_HOME` to keep prefs out of the real config.
+Options window: `options.rs` (gtk::Notebook, applies on OK: daemon Settings + `look::change` prefs + autostart + `zdm-nmhost install|uninstall --browser` per checkbox).
+`Settings.site_logins` (host + subdomains; `Manager::login_for`, used when a task has no login of its own), `zdm-nmhost status` (per browser registered/found), sounds in `sound.rs`,
+proxy parts in `helpers.rs`. Extension: `decideByKeys`/`matchesType`, `content.js` reports modifier keys on link clicks (`click-mods`), popup holds the new switches.
+GOTCHA found by looking at it: `Window::builder().css_classes([..])` REPLACES the default classes (including `background`, which gives the window its text colour) -> invisible text.
+Always `add_css_class` after building. Debug aids: `LDM_OPEN=<action>` (open a dialog at start), `LDM_HIDE_MAIN=1`, `LDM_OPTIONS_TAB=<n>`.
 

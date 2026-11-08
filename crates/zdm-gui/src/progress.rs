@@ -141,6 +141,7 @@ impl ProgressWin {
         tv.add_top_bar(&header);
         tv.set_content(Some(&content));
         let win = adw::Window::builder().transient_for(parent).destroy_with_parent(true).title("Download progress").default_width(520).content(&tv).build();
+    win.add_css_class("ldm-window");
 
         let pw = Rc::new(ProgressWin { win, title, url, status, bar, values, area, layout, full, graph, history, toggle, close_when_done, state: Cell::new(State::Queued) });
         {

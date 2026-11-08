@@ -84,7 +84,8 @@ pub fn open(ui: &Rc<Ui>, prefill: Option<&str>) {
     let tv = adw::ToolbarView::new();
     tv.add_top_bar(&header);
     tv.set_content(Some(&content));
-    let win = adw::Window::builder().transient_for(&ui.window).title("Download video from a web page").default_width(560).default_height(460).content(&tv).css_classes(["ldm-window"]).build();
+    let win = adw::Window::builder().transient_for(&ui.window).title("Download video from a web page").default_width(560).default_height(460).content(&tv).build();
+    win.add_css_class("ldm-window");
 
     {
         let (u, status, spinner, look_up2, download, store) = (ui.clone(), status.clone(), spinner.clone(), look_up.clone(), download.clone(), store.clone());

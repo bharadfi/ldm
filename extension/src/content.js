@@ -30,6 +30,27 @@ if (!window.__ldmContent) {
   let host = null, shadow = null, bar = null, goBtn = null, menu = null;
   let current = null, menuOpen = false, overHost = false, hideTimer = 0;
   const dismissed = new WeakSet();
+  let enabled = true; // the "Show the on-page button" switch in the popup
+
+  try {
+    api.storage.local.get({ showButton: true }).then?.((v) => (enabled = v.showButton !== false));
+    api.storage.onChanged.addListener((c) => {
+      if (c.showButton) {
+        enabled = c.showButton.newValue !== false;
+        if (!enabled && bar) bar.hidden = true;
+      }
+    });
+  } catch {} // storage unavailable: keep the button on
+
+  // tell the background which modifier keys are held when a link is clicked (the "prevent/force" keys)
+  const reportClick = (e) => {
+    if (!e.target?.closest?.('a[href]')) return;
+    try {
+      api.runtime.sendMessage({ type: 'click-mods', alt: e.altKey, ctrl: e.ctrlKey, shift: e.shiftKey, meta: e.metaKey }, () => void api.runtime.lastError);
+    } catch {}
+  };
+  document.addEventListener('mousedown', reportClick, true);
+  document.addEventListener('click', reportClick, true);
 
   const send = (msg) =>
     new Promise((resolve) => {
@@ -73,7 +94,7 @@ if (!window.__ldmContent) {
   }
 
   function eligible(el) {
-    if (dismissed.has(el)) return false;
+    if (!enabled || dismissed.has(el)) return false;
     const r = el.getBoundingClientRect();
     const cs = getComputedStyle(el);
     const hidden = cs.display === 'none' || cs.visibility === 'hidden' || r.bottom < 0 || r.top > innerHeight || r.right < 0 || r.left > innerWidth;

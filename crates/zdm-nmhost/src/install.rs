@@ -80,6 +80,38 @@ pub fn plan(exe: &Path, only: &[String], extra_chrome_ids: &[String], home: &Pat
     Ok(out)
 }
 
+/// Where one browser stands: is our helper registered with it, and does it look installed on this computer?
+#[derive(Debug, Clone, PartialEq)]
+pub struct BrowserStatus {
+    pub name: &'static str,
+    pub registered: bool,
+    pub found: bool,
+}
+
+/// Program names that tell a browser is installed (Linux).
+fn program_names(browser: &str) -> &'static [&'static str] {
+    match browser {
+        "chrome" => &["google-chrome", "google-chrome-stable"],
+        "chromium" => &["chromium", "chromium-browser"],
+        "brave" => &["brave-browser", "brave"],
+        "edge" => &["microsoft-edge", "microsoft-edge-stable"],
+        "firefox" => &["firefox"],
+        _ => &[],
+    }
+}
+
+/// Registration is checked on Linux by the manifest file; `path_dirs` are the directories searched for programs.
+pub fn status(home: &Path, path_dirs: &[PathBuf]) -> Vec<BrowserStatus> {
+    BROWSERS
+        .iter()
+        .map(|b| BrowserStatus {
+            name: b.name,
+            registered: home.join(b.linux_dir).join(format!("{HOST_NAME}.json")).is_file(),
+            found: program_names(b.name).iter().any(|p| path_dirs.iter().any(|d| d.join(p).is_file())),
+        })
+        .collect()
+}
+
 pub fn describe(a: &Action) -> String {
     match a {
         Action::WriteFile { path, .. } => format!("write {}", path.display()),
@@ -135,6 +167,23 @@ mod tests {
     use super::*;
 
     #[cfg(unix)]
+    #[test]
+    fn status_reports_registration_and_installed_programs() {
+        let home = tempfile::tempdir().unwrap();
+        let bin = tempfile::tempdir().unwrap();
+        std::fs::write(bin.path().join("firefox"), "").unwrap();
+        std::fs::write(bin.path().join("brave-browser"), "").unwrap();
+        let p = plan(Path::new("/x"), &["firefox".to_string()], &[], home.path(), home.path()).unwrap();
+        apply(&p).unwrap();
+        let s = status(home.path(), &[bin.path().to_path_buf()]);
+        let get = |n: &str| s.iter().find(|b| b.name == n).unwrap().clone();
+        assert_eq!((get("firefox").registered, get("firefox").found), (true, true));
+        assert_eq!((get("brave").registered, get("brave").found), (false, true));
+        assert_eq!((get("chrome").registered, get("chrome").found), (false, false));
+        remove(&p).unwrap();
+        assert!(!status(home.path(), &[]).iter().any(|b| b.registered));
+    }
+
     #[test]
     fn linux_plan_and_idempotent_apply() {
         let home = tempfile::tempdir().unwrap();

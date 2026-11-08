@@ -15,9 +15,13 @@ async function report(error) {
 
 const taken = new Set();
 
+// Modifier keys held at the last click on a link (reported by content.js); only fresh ones count.
+let lastClick = { mods: {}, at: 0 };
+const freshMods = () => (Date.now() - lastClick.at < 5000 ? lastClick.mods : {});
+
 api.downloads.onCreated.addListener(async (item) => {
   if (taken.has(item.id)) return;
-  const verdict = shouldHandle(item, await settings());
+  const verdict = shouldHandle(item, await settings(), freshMods());
   if (!verdict.handle) return;
   taken.add(item.id);
   try {
@@ -128,6 +132,9 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     const tab = sender.tab;
     if (!tab) throw new Error('no tab');
     switch (msg.type) {
+      case 'click-mods':
+        lastClick = { mods: { alt: !!msg.alt, ctrl: !!msg.ctrl, shift: !!msg.shift, meta: !!msg.meta }, at: Date.now() };
+        return { ok: true };
       case 'media-list':
         return { sniffed: await mediaFor(tab.id) };
       case 'formats': {

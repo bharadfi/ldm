@@ -712,3 +712,35 @@ async fn custom_file_types_decide_the_category_folder() {
     assert_eq!(Path::new(tasks[0].dest.as_deref().unwrap()), env.dl().join("Documents").join("notes.bin"));
     env.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn saved_site_logins_are_used_without_typing_them_again() {
+    use base64::Engine;
+    let basic = testserver::start(ServerCfg { auth: Some(format!("Basic {}", base64::engine::general_purpose::STANDARD.encode("kim:pw1"))), ..server_cfg(MIB, "locked.zip") }).await;
+    let digest = testserver::start(ServerCfg { digest: Some(("lee".into(), "pw2".into())), ..server_cfg(MIB, "safe.zip") }).await;
+    let env = Env::new(None);
+    let mut s = env.m.settings();
+    s.auto_retries = 0;
+    // both test servers are on 127.0.0.1: the login of the exact host wins over a parent domain, and a wrong one stays wrong
+    s.site_logins = vec![
+        zdm_proto::SiteLogin { host: "127.0.0.1".into(), user: "kim".into(), pass: "pw1".into() },
+        zdm_proto::SiteLogin { host: "0.0.1".into(), user: "other".into(), pass: "nope".into() },
+    ];
+    env.m.set_settings(s.clone()).unwrap();
+    assert_eq!(env.m.login_for(&basic.url("/x")), Some(("kim".into(), "pw1".into())));
+    assert_eq!(env.m.login_for("https://elsewhere.test/x"), None);
+    let sub = zdm_proto::SiteLogin { host: "example.com".into(), user: "u".into(), pass: "p".into() };
+    s.site_logins.push(sub);
+    env.m.set_settings(s.clone()).unwrap();
+    assert_eq!(env.m.login_for("https://files.example.com/a.zip"), Some(("u".into(), "p".into())), "subdomains use the parent's login");
+    assert_eq!(env.m.login_for("https://notexample.com/a.zip"), None, "but a different site that merely ends alike does not");
+
+    let a = env.add(basic.url("/locked.zip"));
+    let a = env.until("basic done", |t| t.iter().any(|x| x.id == a.id && matches!(x.state, State::Completed | State::Failed))).await.into_iter().find(|x| x.id == a.id).unwrap();
+    assert_eq!(a.state, State::Completed, "{:?}", a.error);
+    // a login typed with the task beats the saved one; the saved one is wrong for the digest server
+    let d = env.m.add(AddRequest { url: digest.url("/safe.zip"), start: true, auth: Some(("lee".into(), "pw2".into())), ..Default::default() }).unwrap();
+    let all = env.until("digest done", |t| t.iter().any(|x| x.id == d.id && matches!(x.state, State::Completed | State::Failed))).await;
+    assert_eq!(all.iter().find(|x| x.id == d.id).unwrap().state, State::Completed);
+    env.stop().await;
+}

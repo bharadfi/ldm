@@ -2835,6 +2835,7 @@ dependencies = [
  "libadwaita",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "zdm-proto",
 ]

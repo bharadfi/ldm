@@ -35,6 +35,13 @@ pub struct GuiPrefs {
     /// 16 px instead of 22 px toolbar icons.
     #[serde(default)]
     pub toolbar_small: bool,
+    /// Sounds: empty = off, `default` = the desktop's sound for the event, or a file path.
+    #[serde(default)]
+    pub sound_complete: String,
+    #[serde(default)]
+    pub sound_failed: String,
+    #[serde(default)]
+    pub sound_all_done: String,
     /// Titles of the table columns the user switched off.
     #[serde(default)]
     pub hidden_columns: Vec<String>,
@@ -46,7 +53,7 @@ fn nine() -> u32 {
 
 impl Default for GuiPrefs {
     fn default() -> Self {
-        GuiPrefs { auto_progress: true, close_to_tray: true, notifications: true, monitor_clipboard: false, dark_mode: false, font_pt: 9, toolbar_labels: true, toolbar_small: false, hidden_columns: vec![] }
+        GuiPrefs { auto_progress: true, close_to_tray: true, notifications: true, monitor_clipboard: false, dark_mode: false, font_pt: 9, toolbar_labels: true, toolbar_small: false, sound_complete: String::new(), sound_failed: String::new(), sound_all_done: String::new(), hidden_columns: vec![] }
     }
 }
 
@@ -104,6 +111,7 @@ mod tests {
         assert!(!serde_json::from_str::<GuiPrefs>(r#"{"auto_progress":false}"#).unwrap().auto_progress);
         let p = serde_json::from_str::<GuiPrefs>(r#"{"auto_progress":false}"#).unwrap();
         assert!(p.close_to_tray && p.notifications && !p.monitor_clipboard);
+        assert!(p.sound_complete.is_empty() && p.sound_failed.is_empty() && p.sound_all_done.is_empty());
         assert!(!p.dark_mode && p.font_pt == 9 && p.toolbar_labels && !p.toolbar_small && p.hidden_columns.is_empty());
     }
 

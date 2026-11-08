@@ -100,6 +100,7 @@ pub fn open(ui: &Rc<Ui>) {
     tv.add_top_bar(&header);
     tv.set_content(Some(&content));
     let win = adw::Window::builder().transient_for(&ui.window).title("Site grabber").default_width(820).default_height(640).content(&tv).build();
+    win.add_css_class("ldm-window");
 
     let set_all = |store: &gtk::ListStore, on: bool| {
         if let Some(it) = store.iter_first() {

@@ -176,7 +176,7 @@ pub fn install(ui: &Rc<Ui>, app: &adw::Application, slot: &gtk::Box) {
         u.search_entry.grab_focus();
     }));
     mk("select-all", Box::new(|u| u.table.selection().select_all()));
-    mk("options", Box::new(dialogs::options_dialog));
+    mk("options", Box::new(crate::options::open));
     mk("scheduler", Box::new(dialogs::scheduler_dialog));
     mk("about", Box::new(dialogs::about_dialog));
     mk("queue-start", Box::new(|u| queue_resume(u, &current_queue(u))));

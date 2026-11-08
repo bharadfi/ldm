@@ -34,6 +34,79 @@ pub fn parse_extensions(text: &str) -> Vec<String> {
     out
 }
 
+/// The pieces of a proxy address as the Options tab shows them.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ProxyParts {
+    /// `none`, `http`, `https` or `socks5`.
+    pub kind: String,
+    pub host: String,
+    pub port: String,
+    pub user: String,
+    pub pass: String,
+}
+
+fn pct_encode(s: &str) -> String {
+    s.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
+}
+
+fn pct_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let (mut out, mut i) = (Vec::new(), 0);
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// `socks5://user:pw@host:1080` -> parts (anything unreadable shows as "no proxy").
+pub fn parse_proxy(url: Option<&str>) -> ProxyParts {
+    let none = ProxyParts { kind: "none".into(), ..Default::default() };
+    let Some(url) = url else { return none };
+    let Some((scheme, rest)) = url.split_once("://") else { return none };
+    let kind = match scheme {
+        "http" => "http",
+        "https" => "https",
+        "socks5" | "socks5h" => "socks5",
+        _ => return none,
+    };
+    let (userinfo, hostport) = match rest.rsplit_once('@') {
+        Some((u, h)) => (Some(u), h),
+        None => (None, rest),
+    };
+    let hostport = hostport.trim_end_matches('/');
+    let (host, port) = match hostport.rsplit_once(':') {
+        Some((h, p)) if p.chars().all(|c| c.is_ascii_digit()) => (h, p),
+        _ => (hostport, ""),
+    };
+    let (user, pass) = userinfo.map_or(("", ""), |u| u.split_once(':').unwrap_or((u, "")));
+    ProxyParts { kind: kind.into(), host: host.into(), port: port.into(), user: pct_decode(user), pass: pct_decode(pass) }
+}
+
+/// Parts -> the address the daemon wants (`None` = use the system settings).
+pub fn compose_proxy(p: &ProxyParts) -> Result<Option<String>, String> {
+    if p.kind == "none" {
+        return Ok(None);
+    }
+    let host = p.host.trim();
+    if host.is_empty() || host.contains(|c: char| c.is_whitespace() || "/@".contains(c)) {
+        return Err("Type the proxy's host name or address.".into());
+    }
+    if !p.port.is_empty() && p.port.parse::<u16>().is_err() {
+        return Err("The proxy port must be a number from 1 to 65535.".into());
+    }
+    let auth = if p.user.is_empty() { String::new() } else if p.pass.is_empty() { format!("{}@", pct_encode(&p.user)) } else { format!("{}:{}@", pct_encode(&p.user), pct_encode(&p.pass)) };
+    let port = if p.port.is_empty() { String::new() } else { format!(":{}", p.port) };
+    Ok(Some(format!("{}://{auth}{host}{port}", p.kind)))
+}
+
 pub const GRAB_PRESETS: [&str; 8] = ["All files", "Documents", "Images", "Video", "Music", "Compressed", "Programs", "Custom…"];
 
 /// Extensions for a preset of the site grabber (empty = every file-like link). `custom` is free text such as
@@ -155,6 +228,21 @@ mod tests {
         assert_eq!(split_patterns("  */2024/*  thumb,  *.tmp "), ["*/2024/*", "thumb", "*.tmp"]);
         assert!(split_patterns("  , ").is_empty());
         assert_eq!(parse_extensions(" .PDF, zip  mp3 zip bad-ext x/y"), ["pdf", "zip", "mp3"]);
+    }
+
+    #[test]
+    fn proxy_addresses_round_trip() {
+        let p = parse_proxy(Some("socks5://ann:p%40ss%3Aw@127.0.0.1:1080"));
+        assert_eq!(p, ProxyParts { kind: "socks5".into(), host: "127.0.0.1".into(), port: "1080".into(), user: "ann".into(), pass: "p@ss:w".into() });
+        assert_eq!(compose_proxy(&p).unwrap().as_deref(), Some("socks5://ann:p%40ss%3Aw@127.0.0.1:1080"));
+        assert_eq!(parse_proxy(Some("http://proxy.lan:3128")), ProxyParts { kind: "http".into(), host: "proxy.lan".into(), port: "3128".into(), ..Default::default() });
+        assert_eq!(parse_proxy(Some("socks5h://h")).kind, "socks5");
+        assert_eq!(parse_proxy(None).kind, "none");
+        assert_eq!(parse_proxy(Some("ftp://x")).kind, "none");
+        assert_eq!(compose_proxy(&ProxyParts { kind: "none".into(), host: "ignored".into(), ..Default::default() }), Ok(None));
+        assert!(compose_proxy(&ProxyParts { kind: "http".into(), ..Default::default() }).is_err());
+        assert!(compose_proxy(&ProxyParts { kind: "http".into(), host: "h".into(), port: "99999".into(), ..Default::default() }).is_err());
+        assert_eq!(compose_proxy(&ProxyParts { kind: "https".into(), host: "h".into(), user: "u".into(), ..Default::default() }).unwrap().as_deref(), Some("https://u@h"));
     }
 
     #[test]

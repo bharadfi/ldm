@@ -353,7 +353,13 @@ async fn main() -> Result<()> {
         Cmd::Settings { cmd } => {
             let Response::Settings(mut s) = call(&Request::GetSettings).await? else { bail!("unexpected answer") };
             match cmd {
-                None => println!("{}", serde_json::to_string_pretty(&s)?),
+                None => {
+                    // passwords are not printed to the terminal
+                    for l in &mut s.site_logins {
+                        l.pass = "********".into();
+                    }
+                    println!("{}", serde_json::to_string_pretty(&s)?)
+                }
                 Some(c) => {
                     match c {
                         SettingsCmd::Connections { n } => s.connections = n,

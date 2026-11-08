@@ -4,10 +4,9 @@ use std::rc::Rc;
 
 use adw::prelude::*;
 use gtk::{gio, glib};
-use zdm_proto::{AddRequest, AfterAll, QueueInfo, Request, Settings, Window};
+use zdm_proto::{AddRequest, AfterAll, QueueInfo, Request, Window};
 
 use crate::helpers::{self, parse_urls};
-use crate::prefs::{self, GuiPrefs};
 use crate::{selected, send, State, Ui, APP_ID, APP_NAME};
 
 fn toast(ui: &Ui, msg: &str) {
@@ -25,162 +24,6 @@ fn spin(value: f64, lo: f64, hi: f64, step: f64, title: &str) -> adw::SpinRow {
     let row = adw::SpinRow::new(Some(&gtk::Adjustment::new(value, lo, hi, step, step * 5.0, 0.0)), 1.0, 0);
     row.set_title(title);
     row
-}
-
-/// Options: general, connection and browser pages. Daemon settings are sent when the dialog closes.
-pub fn options_dialog(ui: &Rc<Ui>) {
-    let Some(cur) = ui.settings.borrow().clone() else {
-        toast(ui, "Not connected to the download service yet.");
-        return;
-    };
-    let prefs0 = ui.prefs.borrow().clone();
-    let dialog = adw::PreferencesDialog::builder().title("Options").build();
-
-    // General
-    let page = adw::PreferencesPage::builder().title("General").icon_name("preferences-system-symbolic").build();
-    let g = adw::PreferencesGroup::builder().title("Downloads").description("Applies to downloads started from now on.").build();
-    let root = adw::EntryRow::builder().title("Save downloads to (category folders are created inside)").text(&cur.download_root).build();
-    let auto = adw::SwitchRow::builder().title("Show the progress window when a download starts").active(prefs0.auto_progress).build();
-    let exists_modes = ["rename", "overwrite", "skip"];
-    let exists = adw::ComboRow::builder()
-        .title("When a file with the same name already exists")
-        .model(&gtk::StringList::new(&["Add a number to the new name", "Replace the old file", "Skip the download"]))
-        .selected(exists_modes.iter().position(|m| *m == cur.on_exists).unwrap_or(0) as u32)
-        .build();
-    g.add(&root);
-    g.add(&exists);
-    g.add(&auto);
-    page.add(&g);
-    let gf = adw::PreferencesGroup::builder().title("Folder for each category").description("Leave empty to use a sub-folder of the folder above.").build();
-    let cat_rows: Vec<(String, adw::EntryRow)> = crate::view::CATEGORIES
-        .iter()
-        .map(|c| {
-            let row = adw::EntryRow::builder().title(*c).text(cur.category_dirs.get(*c).cloned().unwrap_or_default()).build();
-            gf.add(&row);
-            (c.to_string(), row)
-        })
-        .collect();
-    page.add(&gf);
-    let gt = adw::PreferencesGroup::builder().title("File types of each category").description("Which file extensions go to which category folder, separated by spaces. Anything else goes to Other.").build();
-    let type_rows: Vec<(String, adw::EntryRow)> = zdm_proto::CATEGORY_TABLE
-        .iter()
-        .map(|(c, defaults)| {
-            let shown = cur.category_exts.get(*c).map_or_else(|| defaults.join(" "), |v| v.join(" "));
-            let row = adw::EntryRow::builder().title(*c).text(shown).build();
-            gt.add(&row);
-            (c.to_string(), row)
-        })
-        .collect();
-    page.add(&gt);
-    let gp = adw::PreferencesGroup::builder().title("After each download").description("A shell command, for example a virus scan: clamscan \"$ZDM_FILE\". The finished file is in $ZDM_FILE. If it fails, the download is kept and a note is added.").build();
-    let post = adw::EntryRow::builder().title("Command (empty = none)").text(cur.post_command.clone().unwrap_or_default()).build();
-    gp.add(&post);
-    page.add(&gp);
-    let gi = adw::PreferencesGroup::builder().title("Interface").build();
-    let tray_note = if ui.tray.borrow().is_some() { "" } else { "No tray was found on this desktop, so closing the window will quit the app." };
-    let to_tray = adw::SwitchRow::builder().title("Closing the window keeps the app running in the tray").subtitle(tray_note).active(prefs0.close_to_tray).build();
-    let notes = adw::SwitchRow::builder().title("Show a notification when a download finishes or fails").active(prefs0.notifications).build();
-    let autostart0 = prefs::autostart_enabled();
-    let autostart = adw::SwitchRow::builder().title("Start with the computer (hidden in the tray)").active(autostart0).build();
-    let clip = adw::SwitchRow::builder().title("Offer to download links I copy").subtitle("Shows a button when you copy a link to a file, a video stream or an FTP site while this window is open.").active(prefs0.monitor_clipboard).build();
-    gi.add(&to_tray);
-    gi.add(&notes);
-    gi.add(&clip);
-    gi.add(&autostart);
-    page.add(&gi);
-    dialog.add(&page);
-
-    // Connection
-    let page = adw::PreferencesPage::builder().title("Connection").icon_name("network-wired-symbolic").build();
-    let g = adw::PreferencesGroup::builder().title("Speed").description("More connections usually finish large files sooner; a few servers refuse many.").build();
-    let conns = spin(cur.connections as f64, 1.0, 32.0, 1.0, "Connections per download");
-    let limit = spin(cur.speed_limit_kib as f64, 0.0, 10_000_000.0, 50.0, "Speed limit per download in KiB/s (0 = no limit)");
-    g.add(&conns);
-    g.add(&limit);
-    let gl = spin(cur.global_limit_kib as f64, 0.0, 10_000_000.0, 50.0, "Speed limit for all downloads together in KiB/s (0 = no limit)");
-    g.add(&gl);
-    let g2 = adw::PreferencesGroup::builder().title("Proxy").build();
-    let proxy = adw::EntryRow::builder().title("Proxy address, for example socks5://127.0.0.1:1080 (empty = system settings)").text(cur.proxy.clone().unwrap_or_default()).build();
-    g2.add(&proxy);
-    page.add(&g);
-    let g3 = adw::PreferencesGroup::builder().title("Reliability").description("A download that fails because of a network problem is tried again by itself after a growing pause.").build();
-    let retries = spin(cur.auto_retries as f64, 0.0, 20.0, 1.0, "Automatic retries");
-    g3.add(&retries);
-    page.add(&g2);
-    page.add(&g3);
-    dialog.add(&page);
-
-    // Browser
-    let page = adw::PreferencesPage::builder().title("Browser").icon_name("web-browser-symbolic").build();
-    let g = adw::PreferencesGroup::builder().title("Browser integration").description("Install the helper once, then load the extension from the project's extension/dist folder (see extension/README.md).").build();
-    let row = adw::ActionRow::builder().title("Install the browser helper").subtitle("Lets the extension in Firefox, Chrome, Brave and Edge hand downloads to this app. Writes small files in your home folder only.").subtitle_lines(0).build();
-    let btn = gtk::Button::builder().label("Install").valign(gtk::Align::Center).css_classes(["suggested-action"]).build();
-    row.add_suffix(&btn);
-    g.add(&row);
-    page.add(&g);
-    dialog.add(&page);
-    {
-        let u = ui.clone();
-        btn.connect_clicked(move |_| {
-            let exe = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("zdm-nmhost")));
-            let msg = match exe.filter(|p| p.exists()).map(|p| std::process::Command::new(p).arg("install").output()) {
-                Some(Ok(o)) if o.status.success() => "Browser helper installed. Restart your browser.".to_string(),
-                Some(Ok(o)) => format!("Helper install failed: {}", String::from_utf8_lossy(&o.stderr).lines().next().unwrap_or("unknown error")),
-                Some(Err(e)) => format!("Could not run the helper installer: {e}"),
-                None => "zdm-nmhost was not found next to this program.".to_string(),
-            };
-            toast(&u, &msg);
-        });
-    }
-
-    let u = ui.clone();
-    dialog.connect_closed(move |_| {
-        conns.update();
-        limit.update();
-        gl.update();
-        retries.update();
-        let p = proxy.text().trim().to_string();
-        let category_dirs = cat_rows.iter().filter_map(|(c, r)| Some((c.clone(), r.text().trim().to_string())).filter(|(_, d)| !d.is_empty())).collect();
-        let command = post.text().trim().to_string();
-        // only keep a category's list when it differs from the built-in one
-        let mut category_exts = cur.category_exts.clone();
-        for (cat, row) in &type_rows {
-            let typed = helpers::parse_extensions(&row.text());
-            let default: Vec<String> = zdm_proto::CATEGORY_TABLE.iter().find(|(c, _)| c == cat).map(|(_, d)| d.iter().map(|e| e.to_string()).collect()).unwrap_or_default();
-            if typed.is_empty() || typed == default {
-                category_exts.remove(cat);
-            } else {
-                category_exts.insert(cat.clone(), typed);
-            }
-        }
-        let s = Settings {
-            on_exists: exists_modes[(exists.selected() as usize).min(2)].to_string(),
-            category_exts,
-            connections: conns.value() as u32,
-            speed_limit_kib: limit.value() as u64,
-            global_limit_kib: gl.value() as u64,
-            auto_retries: retries.value() as u32,
-            proxy: (!p.is_empty()).then_some(p),
-            download_root: root.text().trim().to_string(),
-            category_dirs,
-            post_command: (!command.is_empty()).then_some(command),
-        };
-        if s != cur {
-            send(&u, Request::SetSettings(s));
-            toast(&u, "Options saved. They apply to downloads started from now on.");
-        }
-        let gp = GuiPrefs { auto_progress: auto.is_active(), close_to_tray: to_tray.is_active(), notifications: notes.is_active(), monitor_clipboard: clip.is_active(), ..u.prefs.borrow().clone() };
-        if autostart.is_active() != autostart0 {
-            if let Err(e) = prefs::set_autostart(autostart.is_active()) {
-                toast(&u, &format!("Could not change the autostart entry: {e}"));
-            }
-        }
-        if gp != prefs0 {
-            prefs::save(&gp);
-            *u.prefs.borrow_mut() = gp;
-        }
-    });
-    dialog.present(Some(&ui.window));
 }
 
 /// Scheduler: pick a queue, set how many downloads run at once and when it may run; create/delete queues.
@@ -557,7 +400,8 @@ pub fn show_drop_target(ui: &Rc<Ui>) {
     let tv = adw::ToolbarView::new();
     tv.add_top_bar(&header);
     tv.set_content(Some(&content));
-    let win = adw::Window::builder().title("Drop target").default_width(170).default_height(130).resizable(false).content(&tv).css_classes(["ldm-window"]).build();
+    let win = adw::Window::builder().title("Drop target").default_width(170).default_height(130).resizable(false).content(&tv).build();
+    win.add_css_class("ldm-window"); // added, not set: setting css_classes would drop the window's default `background` class
     let drop = gtk::DropTarget::new(String::static_type(), gtk::gdk::DragAction::COPY);
     let u = ui.clone();
     drop.connect_drop(move |_, value, _, _| {

@@ -246,3 +246,41 @@ test('the build puts a self-contained content script in both packages', () => {
     assert.ok(m.permissions.includes('webRequest'));
   }
 });
+
+import { decideByKeys, parseTypeList, matchesType, MODIFIER_KEYS } from '../src/core.js';
+
+test('modifier keys decide between prevent, force and the normal rules', () => {
+  assert.equal(decideByKeys({ alt: true }, { preventKey: 'alt', forceKey: 'none' }), 'prevent');
+  assert.equal(decideByKeys({ shift: true }, { preventKey: 'alt', forceKey: 'shift' }), 'force');
+  assert.equal(decideByKeys({ alt: true, shift: true }, { preventKey: 'alt', forceKey: 'shift' }), 'prevent', 'prevent wins');
+  assert.equal(decideByKeys({}, { preventKey: 'alt', forceKey: 'shift' }), null);
+  assert.equal(decideByKeys({ alt: true }, { preventKey: 'none', forceKey: 'none' }), null, 'switched off');
+  assert.equal(decideByKeys({ alt: true }, { preventKey: 'bogus' }), null);
+  assert.deepEqual(MODIFIER_KEYS, ['none', 'alt', 'ctrl', 'shift', 'meta']);
+});
+
+test('the capture list takes only the chosen file types', () => {
+  assert.deepEqual(parseTypeList(' zip, .RAR 7z;iso zip bad/ext x'), ['zip', 'rar', '7z', 'iso', 'x']);
+  assert.deepEqual(parseTypeList(''), []);
+  assert.equal(matchesType('https://h.test/a/File.ZIP?x=1', ['zip']), true);
+  assert.equal(matchesType('Report final.pdf', ['zip', 'pdf']), true);
+  assert.equal(matchesType('https://h.test/page.html', ['zip']), false);
+  assert.equal(matchesType('https://h.test/noext', ['zip']), false);
+  assert.equal(matchesType('https://h.test/page.html', []), true, 'an empty list takes everything');
+});
+
+test('shouldHandle applies the keys and the capture list', () => {
+  const item = (o = {}) => ({ id: 1, url: 'https://h.test/a.zip', state: 'in_progress', totalBytes: 100, ...o });
+  assert.equal(shouldHandle(item(), {}, { alt: true }).handle, false, 'Alt (default prevent key) leaves it to the browser');
+  assert.equal(shouldHandle(item(), {}, { alt: true }).reason, 'prevent key held');
+  assert.equal(shouldHandle(item(), { preventKey: 'none' }, { alt: true }).handle, true);
+  assert.equal(shouldHandle(item({ url: 'https://h.test/page.html' }), { captureTypes: ['zip'] }).handle, false);
+  assert.equal(shouldHandle(item({ url: 'https://h.test/page.html' }), { captureTypes: ['zip'] }).reason, 'file type not captured');
+  assert.equal(shouldHandle(item(), { captureTypes: ['zip'] }).handle, true);
+  // the force key beats the host list, the minimum size, the capture list and even "disabled"
+  const strict = { enabled: false, excludedHosts: ['h.test'], minSize: 1_000_000, captureTypes: ['iso'], forceKey: 'shift' };
+  assert.equal(shouldHandle(item(), strict, {}).handle, false);
+  assert.equal(shouldHandle(item(), strict, { shift: true }).handle, true);
+  assert.equal(shouldHandle(item({ url: 'blob:https://h.test/x' }), strict, { shift: true }).handle, false, 'still only http(s)');
+  assert.equal(shouldHandle(item({ byExtensionId: 'x' }), strict, { shift: true }).handle, false, 'and never other extensions');
+});

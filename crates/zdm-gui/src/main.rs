@@ -13,9 +13,11 @@ mod grabber;
 mod helpers;
 mod look;
 mod menus;
+mod options;
 mod prefs;
 mod progress;
 mod segments;
+mod sound;
 mod tray;
 mod video;
 mod view;
@@ -85,6 +87,17 @@ fn main() -> glib::ExitCode {
         let ui = build_ui(app);
         if let Ok(base) = std::env::var("LDM_SELFTEST") {
             selftest(&ui, base);
+        }
+        // debugging aid for screenshots: `LDM_OPEN=options` opens that dialog shortly after the window shows
+        if let Ok(action) = std::env::var("LDM_OPEN") {
+            let u = ui.clone();
+            glib::timeout_add_local_once(Duration::from_millis(2500), move || {
+                let _ = gtk::prelude::WidgetExt::activate_action(&u.window, &format!("win.{action}"), None);
+                if std::env::var_os("LDM_HIDE_MAIN").is_some() {
+                    let w = u.window.clone();
+                    glib::timeout_add_local_once(Duration::from_millis(800), move || w.set_visible(false));
+                }
+            });
         }
     });
     // `--background` (used by the autostart entry) starts hidden in the tray; GApplication must not parse it.
@@ -211,7 +224,8 @@ fn build_ui(app: &adw::Application) -> Rc<Ui> {
     let (cmd_tx, cmd_rx) = unbounded_channel::<Request>();
     std::thread::spawn(move || worker(ev_tx, cmd_rx));
 
-    let window = adw::ApplicationWindow::builder().application(app).title(APP_NAME).default_width(940).default_height(560).css_classes(["ldm-window"]).build();
+    let window = adw::ApplicationWindow::builder().application(app).title(APP_NAME).default_width(940).default_height(560).build();
+    window.add_css_class("ldm-window"); // added, not set: css_classes() would remove the default `background` class (and with it the text colour)
 
     // ---- download table ----
     let store = gtk::ListStore::new(&[
@@ -1188,7 +1202,8 @@ fn install_tray(ui: &Rc<Ui>, app: &adw::Application) -> bool {
 /// After each snapshot: desktop notifications for finished/failed downloads and the tray tooltip.
 fn notify_and_tray(ui: &Rc<Ui>, tasks: &[TaskInfo]) {
     let now = glib::real_time() / 1_000_000;
-    if ui.notify_ready.replace(true) && ui.prefs.borrow().notifications {
+    let was_ready = ui.notify_ready.replace(true); // the first snapshot is only recorded: no notices or sounds for old history
+    if was_ready && ui.prefs.borrow().notifications {
         if let Some(app) = ui.window.application() {
             for n in helpers::transitions(&ui.last_states.borrow(), tasks, now) {
                 let (id, title, body) = match n {
@@ -1200,6 +1215,26 @@ fn notify_and_tray(ui: &Rc<Ui>, tasks: &[TaskInfo]) {
                 note.set_icon(&gio::ThemedIcon::new(APP_ID));
                 note.set_default_action("app.show-window");
                 app.send_notification(Some(&id), &note);
+            }
+        }
+    }
+    // sounds: one per finished/failed download, and one when everything is done
+    {
+        let p = ui.prefs.borrow().clone();
+        let busy_now = tasks.iter().any(|t| matches!(t.state, State::Running | State::Queued));
+        let was_busy = ui.last_states.borrow().values().any(|s| matches!(s, State::Running | State::Queued));
+        if was_ready {
+            for n in helpers::transitions(&ui.last_states.borrow(), tasks, now) {
+                let ev = if matches!(n, helpers::Notice::Done { .. }) { sound::SoundEvent::Complete } else { sound::SoundEvent::Failed };
+                let setting = if ev == sound::SoundEvent::Complete { &p.sound_complete } else { &p.sound_failed };
+                if let Some(f) = sound::resolve(setting, ev) {
+                    sound::play(&f);
+                }
+            }
+            if sound::all_done(was_busy, busy_now) {
+                if let Some(f) = sound::resolve(&p.sound_all_done, sound::SoundEvent::AllDone) {
+                    sound::play(&f);
+                }
             }
         }
     }

@@ -198,6 +198,14 @@ pub fn valid_ytdlp_selector(s: &str) -> bool {
     !s.is_empty() && s.len() <= 200 && s.chars().all(|c| c.is_ascii_alphanumeric() || "+-_.[]=/,<>:!*()".contains(c)) && !s.starts_with('-')
 }
 
+/// A saved sign-in for a site: used for downloads from `host` (and its subdomains) that carry no sign-in of their own.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct SiteLogin {
+    pub host: String,
+    pub user: String,
+    pub pass: String,
+}
+
 /// Daemon-wide settings, editable from the Options dialog and saved by the daemon.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Settings {
@@ -227,6 +235,9 @@ pub struct Settings {
     /// Replacement file types (extensions without the dot) of a category, instead of the built-in list.
     #[serde(default)]
     pub category_exts: std::collections::BTreeMap<String, Vec<String>>,
+    /// Saved sign-ins per site (Basic and Digest).
+    #[serde(default)]
+    pub site_logins: Vec<SiteLogin>,
 }
 
 fn default_on_exists() -> String {
@@ -296,6 +307,15 @@ impl Settings {
         for (cat, exts) in &self.category_exts {
             if cat.trim().is_empty() || exts.iter().any(|e| e.is_empty() || e.len() > 12 || !e.chars().all(|c| c.is_ascii_alphanumeric())) {
                 return Err(format!("file types of category \"{cat}\" must be plain extensions such as zip or mp3"));
+            }
+        }
+        for l in &self.site_logins {
+            let host_ok = !l.host.is_empty() && l.host.len() <= 253 && l.host.chars().all(|c| c.is_ascii_alphanumeric() || ".-_".contains(c));
+            if !host_ok {
+                return Err(format!("\"{}\" is not a site name such as example.com", l.host));
+            }
+            if l.user.is_empty() || l.user.len() > 200 || l.user.contains([':', '\n', '\0']) || l.pass.len() > 500 || l.pass.contains(['\n', '\0']) {
+                return Err(format!("the sign-in for {} needs a user name (without a colon) and a password", l.host));
             }
         }
         if let Some(c) = &self.post_command {
@@ -460,7 +480,7 @@ mod tests {
 
     #[test]
     fn settings_validation() {
-        let ok = Settings { connections: 8, speed_limit_kib: 0, proxy: None, download_root: "/tmp/x".into(), global_limit_kib: 0, category_dirs: Default::default(), auto_retries: 3, post_command: None, on_exists: "rename".into(), category_exts: Default::default() };
+        let ok = Settings { connections: 8, speed_limit_kib: 0, proxy: None, download_root: "/tmp/x".into(), global_limit_kib: 0, category_dirs: Default::default(), auto_retries: 3, post_command: None, on_exists: "rename".into(), category_exts: Default::default(), site_logins: vec![] };
         assert!(ok.validate().is_ok());
         assert!(Settings { connections: 0, ..ok.clone() }.validate().is_err());
         assert!(Settings { connections: 33, ..ok.clone() }.validate().is_err());
@@ -468,6 +488,11 @@ mod tests {
         assert!(Settings { proxy: Some("socks5://127.0.0.1:1080".into()), ..ok.clone() }.validate().is_ok());
         assert!(Settings { auto_retries: 21, ..ok.clone() }.validate().is_err());
         assert!(Settings { on_exists: "ask".into(), ..ok.clone() }.validate().is_err());
+        let login = |h: &str, u: &str| SiteLogin { host: h.into(), user: u.into(), pass: "pw".into() };
+        assert!(Settings { site_logins: vec![login("files.example.com", "ann")], ..ok.clone() }.validate().is_ok());
+        for bad in [login("", "ann"), login("a b", "ann"), login("https://x.com", "ann"), login("x.com", ""), login("x.com", "a:b")] {
+            assert!(Settings { site_logins: vec![bad], ..ok.clone() }.validate().is_err());
+        }
         assert!(Settings { on_exists: "overwrite".into(), ..ok.clone() }.validate().is_ok());
         let mut exts = std::collections::BTreeMap::new();
         exts.insert("Video".to_string(), vec!["mp4".to_string(), "my file".to_string()]);

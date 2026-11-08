@@ -22,6 +22,16 @@
   <label class="col">Keep files smaller than (MiB) in the browser
     <input type="number" id="minSize" min="0" step="1">
   </label>
+  <label class="col">Hold this key while clicking a link to let the browser download it
+    <select id="preventKey"></select>
+  </label>
+  <label class="col">Hold this key to force downloading with the program
+    <select id="forceKey"></select>
+  </label>
+  <label class="col">Only take over these file types (empty = every download)
+    <input type="text" id="captureTypes" placeholder="zip rar 7z iso exe pdf mp3 mp4" spellcheck="false">
+  </label>
+  <label class="row"><input type="checkbox" id="showButton"> Show the “Download this video” button on players</label>
   <label class="col">Sites the browser should keep handling (one per line)
     <textarea id="excluded" rows="3" spellcheck="false"></textarea>
   </label>

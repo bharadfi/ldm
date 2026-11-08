@@ -13,6 +13,7 @@ const USAGE: &str = "zdm-nmhost: browser <-> zdmd bridge
 Usage:
   zdm-nmhost install   [--browser NAME]... [--chrome-extension-id ID]... [--dry-run]
   zdm-nmhost uninstall [--browser NAME]... [--dry-run]
+  zdm-nmhost status
 
 Browsers start it themselves with no arguments (native messaging over stdin/stdout).
 ";
@@ -23,6 +24,15 @@ async fn main() -> Result<()> {
     match args.first().map(String::as_str) {
         Some("install") => manage(&args[1..], true),
         Some("uninstall") => manage(&args[1..], false),
+        Some("status") => {
+            // one line per browser: `name registered|no found|absent` (read by the app's Options window)
+            let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home directory"))?;
+            let dirs: Vec<std::path::PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
+            for b in install::status(&home, &dirs) {
+                println!("{} {} {}", b.name, if b.registered { "registered" } else { "no" }, if b.found { "found" } else { "absent" });
+            }
+            Ok(())
+        }
         Some("--help" | "-h" | "help") => {
             print!("{USAGE}");
             Ok(())

@@ -6,7 +6,47 @@ export const DEFAULTS = {
   minSize: 0,
   // Hosts (and their subdomains) the browser should keep downloading itself.
   excludedHosts: [],
+  // Hold this key while clicking a download link to let the browser handle it ('none' to switch it off).
+  preventKey: 'alt',
+  // Hold this key to take the download over even if it would normally stay with the browser.
+  forceKey: 'none',
+  // Only take over these file types (extensions, lower case); empty = every download.
+  captureTypes: [],
+  // Show the "Download this video" button on players.
+  showButton: true,
 };
+
+export const MODIFIER_KEYS = ['none', 'alt', 'ctrl', 'shift', 'meta'];
+
+/** 'prevent' | 'force' | null for the modifier keys held when a link was clicked. Prevent wins if both match. */
+export function decideByKeys(mods = {}, { preventKey = 'alt', forceKey = 'none' } = {}) {
+  const held = (k) => k !== 'none' && MODIFIER_KEYS.includes(k) && mods[k] === true;
+  if (held(preventKey)) return 'prevent';
+  if (held(forceKey)) return 'force';
+  return null;
+}
+
+/** `zip, .RAR 7z` -> ['zip', 'rar', '7z'] */
+export function parseTypeList(text) {
+  const out = [];
+  for (const t of String(text).split(/[\s,;]+/)) {
+    const e = t.replace(/^\./, '').toLowerCase();
+    if (/^[a-z0-9]{1,12}$/.test(e) && !out.includes(e)) out.push(e);
+  }
+  return out;
+}
+
+/** Is the file's type in the capture list? (An empty list captures everything.) */
+export function matchesType(urlOrName, types = []) {
+  if (!types.length) return true;
+  let path = String(urlOrName);
+  try {
+    path = new URL(path).pathname;
+  } catch {}
+  const last = decodeURIComponent(path.split('/').pop() || '');
+  const i = last.lastIndexOf('.');
+  return i > 0 && types.includes(last.slice(i + 1).toLowerCase());
+}
 
 export function isHttp(url) {
   try {
@@ -31,16 +71,20 @@ export function hostMatches(url, hosts) {
 }
 
 /** Decide whether a browser download item should be taken over by ZDM. */
-export function shouldHandle(item, settings) {
+export function shouldHandle(item, settings, mods = {}) {
   const s = { ...DEFAULTS, ...settings };
-  if (!s.enabled) return { handle: false, reason: 'disabled' };
+  const key = decideByKeys(mods, s);
+  if (key === 'prevent') return { handle: false, reason: 'prevent key held' };
+  const forced = key === 'force';
+  if (!s.enabled && !forced) return { handle: false, reason: 'disabled' };
   if (item.byExtensionId) return { handle: false, reason: 'started by an extension' };
   if (item.state && item.state !== 'in_progress') return { handle: false, reason: `state ${item.state}` };
   const url = item.finalUrl || item.url;
   if (!isHttp(url)) return { handle: false, reason: 'not an http(s) URL' };
-  if (hostMatches(url, s.excludedHosts)) return { handle: false, reason: 'excluded host' };
+  if (!forced && hostMatches(url, s.excludedHosts)) return { handle: false, reason: 'excluded host' };
+  if (!forced && !matchesType(item.filename || url, s.captureTypes)) return { handle: false, reason: 'file type not captured' };
   const size = item.totalBytes > 0 ? item.totalBytes : item.fileSize > 0 ? item.fileSize : 0;
-  if (size > 0 && size < s.minSize) return { handle: false, reason: 'below minimum size' };
+  if (!forced && size > 0 && size < s.minSize) return { handle: false, reason: 'below minimum size' };
   return { handle: true, reason: 'ok' };
 }
 

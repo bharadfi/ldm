@@ -50,6 +50,7 @@ fn load_settings(cfg: &Config) -> Settings {
         post_command: None,
         on_exists: "rename".into(),
         category_exts: Default::default(),
+        site_logins: vec![],
     };
     std::fs::read(settings_path(cfg)).ok().and_then(|b| serde_json::from_slice::<Settings>(&b).ok()).filter(|s| s.validate().is_ok()).unwrap_or(defaults)
 }
@@ -179,6 +180,20 @@ impl Manager {
         self.global.set_rate(s.global_limit_kib * 1024);
         *self.settings.lock().unwrap() = s;
         Ok(())
+    }
+
+    /// The saved sign-in for the site of `url`, if any (an exact host match wins over a parent domain).
+    pub fn login_for(&self, url: &str) -> Option<(String, String)> {
+        let host = url::Url::parse(url).ok()?.host_str()?.to_ascii_lowercase();
+        let set = self.settings.lock().unwrap();
+        set.site_logins
+            .iter()
+            .filter(|l| {
+                let h = l.host.to_ascii_lowercase();
+                host == h || host.ends_with(&format!(".{h}"))
+            })
+            .max_by_key(|l| l.host.len())
+            .map(|l| (l.user.clone(), l.pass.clone()))
     }
 
     /// What a video page offers, through yt-dlp.
@@ -633,6 +648,7 @@ impl Manager {
         let userinfo = headers.iter().position(|(k, _)| k.eq_ignore_ascii_case(AUTH_HEADER)).map(|i| headers.remove(i).1);
         headers.retain(|(k, _)| !k.eq_ignore_ascii_case(YTDLP_HEADER)); // ours, not a request header
         let auth = userinfo.and_then(|v| v.split_once(':').map(|(u, p)| (u.replace("%3A", ":"), p.to_string())));
+        let auth = auth.or_else(|| self.login_for(&row.info.url)); // a saved site login, when the task has none of its own
         let mut opts = Options {
             auth: auth.clone(),
             creds: Arc::new(auth.as_ref().map_or_else(zdm_core::Credentials::default, |(u, p)| zdm_core::Credentials::new(u, p))),
@@ -750,7 +766,7 @@ impl Manager {
         let mut headers = row.headers.clone();
         let userinfo = headers.iter().position(|(k, _)| k.eq_ignore_ascii_case(AUTH_HEADER)).map(|i| headers.remove(i).1);
         let opts = Options {
-            auth: userinfo.and_then(|v| v.split_once(':').map(|(u, p)| (u.replace("%3A", ":"), p.to_string()))),
+            auth: userinfo.and_then(|v| v.split_once(':').map(|(u, p)| (u.replace("%3A", ":"), p.to_string()))).or_else(|| self.login_for(&row.info.url)),
             proxy: set.proxy.clone(),
             referer: row.referer.clone(),
             headers,

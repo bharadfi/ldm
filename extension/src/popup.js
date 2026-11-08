@@ -1,4 +1,4 @@
-import { DEFAULTS, parseExcludedHosts, mediaName, mediaSupported } from './core.js';
+import { DEFAULTS, MODIFIER_KEYS, parseExcludedHosts, parseTypeList, mediaName, mediaSupported } from './core.js';
 import { handOver } from './host.js';
 
 const api = globalThis.browser ?? globalThis.chrome;
@@ -10,6 +10,13 @@ async function load() {
   $('enabled').checked = s.enabled;
   $('minSize').value = Math.round(s.minSize / MIB);
   $('excluded').value = s.excludedHosts.join('\n');
+  for (const id of ['preventKey', 'forceKey']) {
+    const sel = $(id);
+    sel.replaceChildren(...MODIFIER_KEYS.map((k) => Object.assign(document.createElement('option'), { value: k, textContent: k === 'none' ? 'None' : k[0].toUpperCase() + k.slice(1) })));
+    sel.value = s[id];
+  }
+  $('captureTypes').value = s.captureTypes.join(' ');
+  $('showButton').checked = s.showButton;
 }
 
 async function save() {
@@ -17,6 +24,10 @@ async function save() {
     enabled: $('enabled').checked,
     minSize: Math.max(0, Number($('minSize').value) || 0) * MIB,
     excludedHosts: parseExcludedHosts($('excluded').value),
+    preventKey: $('preventKey').value,
+    forceKey: $('forceKey').value,
+    captureTypes: parseTypeList($('captureTypes').value),
+    showButton: $('showButton').checked,
   });
 }
 
@@ -38,7 +49,7 @@ async function checkPermission() {
   $('grant').hidden = have;
 }
 
-for (const id of ['enabled', 'minSize', 'excluded']) $(id).addEventListener('change', save);
+for (const id of ['enabled', 'minSize', 'excluded', 'preventKey', 'forceKey', 'captureTypes', 'showButton']) $(id).addEventListener('change', save);
 $('grantBtn').addEventListener('click', async () => {
   await api.permissions.request({ origins: ['<all_urls>'] });
   await checkPermission();
