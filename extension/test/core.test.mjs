@@ -284,3 +284,15 @@ test('shouldHandle applies the keys and the capture list', () => {
   assert.equal(shouldHandle(item({ url: 'blob:https://h.test/x' }), strict, { shift: true }).handle, false, 'still only http(s)');
   assert.equal(shouldHandle(item({ byExtensionId: 'x' }), strict, { shift: true }).handle, false, 'and never other extensions');
 });
+
+import { explainError } from '../src/core.js';
+
+test('errors are explained in plain words and never swallowed', () => {
+  assert.match(explainError('Specified native messaging host not found.'), /not registered for this browser/);
+  assert.match(explainError('Access to the specified native messaging host is forbidden.'), /does not allow this extension/);
+  assert.match(explainError('Native host has exited.'), /start Linux Download Manager/);
+  assert.match(explainError('no answer'), /reload it/);
+  assert.match(explainError('Extension context invalidated.'), /reload it/);
+  assert.equal(explainError('yt-dlp (yt-dlp 2024.04.09) could not read this page'), 'yt-dlp (yt-dlp 2024.04.09) could not read this page', 'the app\'s own messages pass through');
+  assert.equal(explainError(''), 'unknown error');
+});

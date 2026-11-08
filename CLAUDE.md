@@ -118,4 +118,9 @@ Options window: `options.rs` (gtk::Notebook, applies on OK: daemon Settings + `l
 proxy parts in `helpers.rs`. Extension: `decideByKeys`/`matchesType`, `content.js` reports modifier keys on link clicks (`click-mods`), popup holds the new switches.
 GOTCHA found by looking at it: `Window::builder().css_classes([..])` REPLACES the default classes (including `background`, which gives the window its text colour) -> invisible text.
 Always `add_css_class` after building. Debug aids: `LDM_OPEN=<action>` (open a dialog at start), `LDM_HIDE_MAIN=1`, `LDM_OPTIONS_TAB=<n>`.
+yt-dlp lookup (`ytdlp::ytdlp_info`): several copies can exist (old /usr/bin one, newer ~/.local/bin one) and a program started from the desktop/browser may lack ~/.local/bin on PATH,
+so ALL candidates are asked `--version` and the newest wins (cached 10 min); errors name the version and say to run `yt-dlp -U`. The page menu now shows the real error
+(`explainError`) instead of a vague "nothing found". REAL end-to-end test recipe (works, found two bugs): start `brave --headless=new --remote-debugging-port=9333
+--user-data-dir=<tmp> --load-extension=extension/dist/chrome --disable-features=DisableLoadExtensionCommandLineSwitch`, copy the NativeMessagingHosts manifest into `<tmp>/NativeMessagingHosts/`,
+drive it over CDP with python `websockets` (service-worker `chrome.runtime.sendNativeMessage`, page hover/click via `Input.dispatchMouseEvent`, `Page.captureScreenshot`).
 

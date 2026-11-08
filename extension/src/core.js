@@ -262,6 +262,16 @@ export function parseHlsVariants(text, baseUrl) {
   return out.sort((a, b) => b.height - a.height || b.bandwidth - a.bandwidth);
 }
 
+/** Plain-words explanation of an error from the extension or the native helper. */
+export function explainError(message) {
+  const m = String(message || 'unknown error');
+  if (/native messaging host/i.test(m) && /not found/i.test(m)) return `${m} The helper is not registered for this browser: open Options > General in Linux Download Manager, tick this browser, then restart it.`;
+  if (/forbidden/i.test(m)) return `${m} The helper's registration does not allow this extension (reinstall the helper from Options > General).`;
+  if (/host has exited|disconnected/i.test(m)) return `${m} The helper stopped: start Linux Download Manager and try again.`;
+  if (/no answer|receiving end|context invalidated/i.test(m)) return 'The extension was just updated: reload it on the browser\'s extensions page, then reload this page.';
+  return m;
+}
+
 const KIND_TITLE = { video: 'Video', audio: 'Audio only', subtitle: 'Subtitles', stream: 'Found on this page' };
 
 /**

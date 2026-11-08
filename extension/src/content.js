@@ -189,7 +189,8 @@ if (!window.__ldmContent) {
     if (!menuOpen) return;
     const rows = menuRows({ sniffed, formats: res.options || [] });
     if (res.error) {
-      render(rows, rows.length ? null : { error: true, text: res.error.includes('yt-dlp') ? res.error : 'Nothing to download was found on this page.' });
+      // show the real reason (a missing helper, an old yt-dlp...) instead of a vague "nothing found"
+      render(rows, { error: true, text: `Could not get the formats: ${explainError(res.error)}` });
     } else {
       render(rows, rows.length ? null : { text: 'Nothing to download was found on this page.' });
     }

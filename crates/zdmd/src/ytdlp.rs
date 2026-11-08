@@ -15,12 +15,84 @@ use tokio_util::sync::CancellationToken;
 use zdm_core::Cancelled;
 use zdm_proto::{FormatList, FormatOption};
 
-pub fn ytdlp_path() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("ZDM_YTDLP") {
-        return (!p.is_empty() && p != "none").then(|| PathBuf::from(p));
+/// Sortable numbers of a yt-dlp version (`2026.10.26`, `2025.01.15.232754`): newer is bigger.
+pub fn version_key(v: &str) -> Vec<u64> {
+    v.trim().split(|c: char| !c.is_ascii_digit()).filter(|p| !p.is_empty()).filter_map(|p| p.parse().ok()).collect()
+}
+
+/// The newest of the installed copies. Several can exist (the distribution's old one in /usr/bin, one
+/// downloaded into ~/.local/bin) and which one a program finds depends on its PATH, so look at all of them.
+pub fn newest(candidates: Vec<(PathBuf, String)>) -> Option<(PathBuf, String)> {
+    candidates.into_iter().max_by(|a, b| version_key(&a.1).cmp(&version_key(&b.1)))
+}
+
+fn run_version(exe: &Path) -> Option<String> {
+    let mut child = std::process::Command::new(exe).arg("--version").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait().ok()? {
+            Some(st) if st.success() => {
+                let mut s = String::new();
+                std::io::Read::read_to_string(child.stdout.as_mut()?, &mut s).ok()?;
+                return Some(s.trim().to_string()).filter(|v| !v.is_empty());
+            }
+            Some(_) => return None,
+            None if start.elapsed() > Duration::from_secs(10) => {
+                let _ = child.kill();
+                return None;
+            }
+            None => std::thread::sleep(Duration::from_millis(20)),
+        }
     }
-    let on_path = std::env::var_os("PATH").and_then(|p| std::env::split_paths(&p).map(|d| d.join("yt-dlp")).find(|f| f.is_file()));
-    on_path.or_else(|| dirs::home_dir().map(|h| h.join(".local/bin/yt-dlp")).filter(|f| f.is_file()))
+}
+
+fn candidate_paths() -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = vec![];
+    if let Some(h) = dirs::home_dir() {
+        dirs.push(h.join(".local/bin"));
+    }
+    if let Some(p) = std::env::var_os("PATH") {
+        dirs.extend(std::env::split_paths(&p));
+    }
+    dirs.extend(["/usr/local/bin", "/usr/bin", "/snap/bin"].map(PathBuf::from));
+    let mut out: Vec<PathBuf> = vec![];
+    for d in dirs {
+        let f = d.join("yt-dlp");
+        // two directories can lead to the same program (/bin -> /usr/bin): ask each program once
+        let real = std::fs::canonicalize(&f).unwrap_or_else(|_| f.clone());
+        if f.is_file() && !out.iter().any(|o| std::fs::canonicalize(o).unwrap_or_else(|_| o.clone()) == real) {
+            out.push(f);
+        }
+    }
+    out
+}
+
+type Found = Option<(PathBuf, String)>;
+
+/// (program, version) of the newest installed yt-dlp; looked up at most every ten minutes.
+pub fn ytdlp_info() -> Found {
+    static CACHE: std::sync::Mutex<Option<(std::time::Instant, Found)>> = std::sync::Mutex::new(None);
+    if let Ok(p) = std::env::var("ZDM_YTDLP") {
+        // tests (and anyone who wants to force one) name the program; it is not asked for its version
+        return (!p.is_empty() && p != "none").then(|| (PathBuf::from(p), "(chosen)".to_string()));
+    }
+    let mut cache = CACHE.lock().unwrap();
+    if let Some((at, found)) = &*cache {
+        if at.elapsed() < Duration::from_secs(600) && found.is_some() {
+            return found.clone();
+        }
+    }
+    let found = newest(candidate_paths().into_iter().filter_map(|p| run_version(&p).map(|v| (p, v))).collect());
+    *cache = Some((std::time::Instant::now(), found.clone()));
+    found
+}
+
+pub fn ytdlp_path() -> Option<PathBuf> {
+    ytdlp_info().map(|(p, _)| p)
+}
+
+fn version_note() -> String {
+    ytdlp_info().map(|(_, v)| format!(" (yt-dlp {v})")).unwrap_or_default()
 }
 
 fn need_ytdlp() -> Result<PathBuf> {
@@ -165,12 +237,16 @@ pub async fn list_formats(url: &str, proxy: Option<&str>) -> Result<FormatList> 
     if !out.status.success() {
         let e = String::from_utf8_lossy(&out.stderr);
         let line = e.lines().rev().find(|l| l.contains("ERROR")).or_else(|| e.lines().last()).unwrap_or("unknown error");
-        bail!("yt-dlp could not read this page: {}", line.trim_start_matches("ERROR: ").trim());
+        bail!("yt-dlp{} could not read this page: {}. If this keeps happening, update yt-dlp with `yt-dlp -U`.", version_note(), line.trim_start_matches("ERROR: ").trim());
     }
     let v: Value = serde_json::from_slice(&out.stdout).context("yt-dlp gave an unreadable answer")?;
+    if v.is_null() {
+        // an outdated yt-dlp often answers "null" for sites that changed; say so instead of "nothing found"
+        bail!("yt-dlp{} could not read this page; it is probably out of date: update it with `yt-dlp -U` (or download the newest from github.com/yt-dlp/yt-dlp)", version_note());
+    }
     let list = curate(&v);
     if list.options.is_empty() {
-        bail!("no downloadable video or audio was found on this page");
+        bail!("yt-dlp{} found no video or audio to download on this page", version_note());
     }
     Ok(list)
 }
@@ -359,6 +435,21 @@ mod tests {
         let auto: Vec<String> = curate(&v).options.iter().filter(|o| o.kind == "subtitle").map(|o| o.id.clone()).collect();
         assert_eq!(auto, ["sub-auto:en"]);
         assert!(curate(&serde_json::json!({"title": "x", "formats": []})).options.is_empty());
+    }
+
+    #[test]
+    fn the_newest_copy_wins_whatever_the_search_path() {
+        assert!(version_key("2026.10.26") > version_key("2024.04.09"));
+        assert!(version_key("2025.01.15.232754") > version_key("2025.01.15"));
+        assert!(version_key("2025.10.02") > version_key("2025.9.30"), "numbers, not text: 10 > 9");
+        let best = newest(vec![
+            (PathBuf::from("/usr/bin/yt-dlp"), "2024.04.09".into()),
+            (PathBuf::from("/home/me/.local/bin/yt-dlp"), "2026.10.26".into()),
+            (PathBuf::from("/usr/local/bin/yt-dlp"), "2025.06.01".into()),
+        ])
+        .unwrap();
+        assert_eq!(best.0, PathBuf::from("/home/me/.local/bin/yt-dlp"));
+        assert!(newest(vec![]).is_none());
     }
 
     #[test]
