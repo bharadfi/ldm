@@ -142,6 +142,9 @@ pub(crate) struct Ctx {
 struct Gate {
     sem: tokio::sync::Semaphore,
     total: std::sync::atomic::AtomicUsize,
+    max: usize,
+    /// When the server last said "slow down" (or when we last tried one more connection).
+    changed: Mutex<std::time::Instant>,
 }
 
 impl Default for Gate {
@@ -153,11 +156,25 @@ impl Default for Gate {
 impl Gate {
     fn new(n: usize) -> Gate {
         let n = n.max(1);
-        Gate { sem: tokio::sync::Semaphore::new(n), total: std::sync::atomic::AtomicUsize::new(n) }
+        Gate { sem: tokio::sync::Semaphore::new(n), total: std::sync::atomic::AtomicUsize::new(n), max: n, changed: Mutex::new(std::time::Instant::now()) }
+    }
+
+    /// After a quiet spell, try one more connection again (the strictness may have been temporary), up to the start value.
+    fn maybe_grow(&self) {
+        if self.total.load(Ordering::SeqCst) >= self.max {
+            return;
+        }
+        let mut at = self.changed.lock().unwrap();
+        if at.elapsed() >= Duration::from_secs(20) {
+            *at = std::time::Instant::now();
+            self.total.fetch_add(1, Ordering::SeqCst);
+            self.sem.add_permits(1);
+        }
     }
 
     /// Give up one slot for good, unless it is the last one.
     fn shrink(&self, permit: tokio::sync::SemaphorePermit<'_>) {
+        *self.changed.lock().unwrap() = std::time::Instant::now();
         let mut cur = self.total.load(Ordering::SeqCst);
         while cur > 1 {
             match self.total.compare_exchange(cur, cur - 1, Ordering::SeqCst, Ordering::SeqCst) {
@@ -556,6 +573,7 @@ async fn fetch_range(
     validator: Option<&str>,
     lim: &Ctx,
 ) -> std::result::Result<(), FetchError> {
+    lim.gate.maybe_grow();
     let permit = lim.gate.sem.acquire().await.map_err(|e| FetchError::Fatal(e.into()))?;
     let mut req = lim.creds.sign(client.get(url), url).header(RANGE, format!("bytes={}-{}", pos, end - 1));
     if let Some(v) = validator {

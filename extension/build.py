@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parent
 SRC = ROOT / "src"
 DIST = ROOT / "dist"
 
-VERSION = "0.1.5"
+VERSION = "0.1.6"
 # Public half of a throwaway key pair: pins the Chromium extension ID so the native-messaging manifest can
 # allow exactly this extension. Must match CHROME_EXTENSION_ID in crates/zdm-nmhost/src/lib.rs.
 CHROME_KEY = (
