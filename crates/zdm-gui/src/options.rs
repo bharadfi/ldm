@@ -119,6 +119,29 @@ fn browser_scheme(name: &str) -> &'static str {
     }
 }
 
+/// Firefox Developer Edition and Nightly honour this profile setting, which lets an unsigned add-on be added.
+/// Returns true when the line was added just now.
+fn allow_unsigned_addons(program: &str) -> bool {
+    let suffix = match program {
+        "firefox-developer-edition" | "firefox-dev" => ".dev-edition-default",
+        "firefox-nightly" => ".default-nightly",
+        _ => return false,
+    };
+    let Some(root) = std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".mozilla/firefox")) else { return false };
+    let Ok(dirs) = std::fs::read_dir(root) else { return false };
+    for d in dirs.flatten().filter(|d| d.path().is_dir() && d.file_name().to_string_lossy().ends_with(suffix)) {
+        let f = d.path().join("user.js");
+        const LINE: &str = "user_pref(\"xpinstall.signatures.required\", false);";
+        let text = std::fs::read_to_string(&f).unwrap_or_default();
+        if text.contains(LINE) {
+            return false;
+        }
+        let sep = if text.is_empty() || text.ends_with('\n') { "" } else { "\n" };
+        return std::fs::write(&f, format!("{text}{sep}{LINE}\n")).is_ok();
+    }
+    false
+}
+
 fn launch_browser(name: &str, url: &str) {
     let _ = std::process::Command::new(browser_program(name)).arg(url).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
 }
@@ -185,8 +208,8 @@ pub fn open(ui: &Rc<Ui>) {
     // ---------------- General ----------------
     let mut f = Form::new();
     f.heading("Browser and system integration");
-    f.note("Tick a browser to let it talk to this program. Install opens the browser's extensions page and the extension folder: switch on Developer mode, press Load unpacked and choose that folder (a one-click prompt like the Web Store's needs the extension to be published there, which it is not yet). Remove takes you to the extension's page in the browser, where you press Remove. ");
-    f.note("Firefox: this add-on is not signed by Mozilla yet, so Install works only in Firefox Developer Edition or Nightly, and only after you open about:config and set xpinstall.signatures.required to false. Regular Firefox will refuse it.");
+    f.note("Tick a browser to let it talk to this program. Install opens the browser's extensions page and copies the extension folder's path: switch on Developer mode, press Load unpacked and paste the path (a one-click prompt like the Web Store's needs the extension to be published there, which it is not yet). Remove takes you to the extension's page in the browser, where you press Remove. ");
+    f.note("Firefox: this add-on is not signed by Mozilla yet, so Install works only in Firefox Developer Edition or Nightly. Install adds the line xpinstall.signatures.required = false to that Firefox profile's user.js so it can ask you to add the add-on. Regular Firefox will refuse it.");
     let statuses = browser_status();
     let browser_checks: Vec<(String, bool, gtk::CheckButton)> = statuses
         .iter()
@@ -208,7 +231,8 @@ pub fn open(ui: &Rc<Ui>) {
                     let xpi = ["/usr/share/linux-download-manager/ldm.xpi", "extension/dist/ldm.xpi"].into_iter().find(|p| std::path::Path::new(p).is_file());
                     match xpi {
                         Some(x) => {
-                            st.set_label("Confirm in Firefox");
+                            let added = allow_unsigned_addons(browser_program("firefox"));
+                            st.set_label(if added { "Press Add in Firefox (if it cannot verify, close Firefox and press Install again)" } else { "Press Add in Firefox's prompt" });
                             launch_browser("firefox", x);
                         }
                         None => st.set_label("Add-on file not found"),
@@ -219,10 +243,11 @@ pub fn open(ui: &Rc<Ui>) {
                 // browser on its extensions page and the folder, so the steps are Developer mode > Load unpacked > pick it.
                 let dir = ["/usr/share/linux-download-manager/chrome", "extension/dist/chrome"].into_iter().map(std::path::PathBuf::from).find(|d| d.is_dir());
                 if let Some(d) = dir {
-                    let _ = gtk::gio::AppInfo::launch_default_for_uri(&format!("file://{}", d.display()), None::<&gtk::gio::AppLaunchContext>);
+                    // the folder chooser accepts a pasted path (Ctrl+V in its location box)
+                    b.clipboard().set_text(&d.display().to_string());
                 }
                 launch_browser(&n, &format!("{}://extensions", browser_scheme(&n)));
-                st.set_label("Developer mode > Load unpacked > choose the folder");
+                st.set_label("Developer mode > Load unpacked > paste the folder path (copied)");
                 b.set_sensitive(false);
             });
             // Removing is done in the browser itself: take the user to the extension's page there.
