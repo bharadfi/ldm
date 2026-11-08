@@ -869,6 +869,11 @@ fn show_progress(ui: &Rc<Ui>, id: i64) {
         pw.update(&t, speed);
     }
     ui.progress.borrow_mut().insert(id, pw.clone());
+    // A window tied to a hidden main window (the program sits in the tray) may never appear: stand on its own then.
+    if !ui.window.is_visible() {
+        pw.win.set_transient_for(None::<&gtk::Window>);
+        pw.win.set_destroy_with_parent(false);
+    }
     pw.win.present();
 }
 
