@@ -286,7 +286,7 @@ async fn main() -> Result<()> {
         }
         Cmd::Add { url, filename, dest_dir, queue, referer, user_agent, headers, paused, user, again, format } => {
             let auth = user.map(|u| u.split_once(':').map_or((u.clone(), String::new()), |(a, b)| (a.to_string(), b.to_string())));
-            let req = AddRequest { url, filename, dest_dir, queue, referer, user_agent, headers: parse_headers(&headers)?, start: !paused, allow_duplicate: again, auth, ytdlp: format };
+            let req = AddRequest { url, filename, dest_dir, queue, referer, user_agent, headers: parse_headers(&headers)?, start: !paused, allow_duplicate: again, auth, ytdlp: format, ask: false };
             let r = call(&Request::Add(req)).await?;
             if let Response::Task(t) = r {
                 print_task(&t);

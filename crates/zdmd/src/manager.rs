@@ -11,7 +11,7 @@ use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use zdm_core::{build_client, download_probed, Cancelled, Limiter, Options};
-use zdm_proto::{AddRequest, AfterAll, GrabLink, GrabRequest, QueueInfo, Settings, State, TaskInfo};
+use zdm_proto::{AddRequest, AfterAll, GrabLink, GrabRequest, PreviewInfo, QueueInfo, Settings, State, TaskInfo, ASK_MARKER};
 
 use crate::categories::categorize_with;
 use crate::config::Config;
@@ -398,8 +398,66 @@ impl Manager {
                 headers: &a.headers,
             })?
         };
+        if a.ask {
+            self.store().set_state(id, State::Paused, Some(ASK_MARKER))?;
+        }
         self.wake.notify_one();
         self.get(id)
+    }
+
+    /// Name, size and destination of a task that has not started, for the confirmation window.
+    pub async fn preview(&self, id: i64) -> Result<PreviewInfo> {
+        let row = self.store().task(id)?.ok_or_else(|| anyhow!("no such task: {id}"))?;
+        let set = self.settings();
+        let mut headers = row.headers.clone();
+        let userinfo = headers.iter().position(|(k, _)| k.eq_ignore_ascii_case(AUTH_HEADER)).map(|i| headers.remove(i).1);
+        headers.retain(|(k, _)| !k.eq_ignore_ascii_case(YTDLP_HEADER));
+        let auth = userinfo.and_then(|v| v.split_once(':').map(|(u, p)| (u.replace("%3A", ":"), p.to_string()))).or_else(|| self.login_for(&row.info.url));
+        let is_page = row.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case(YTDLP_HEADER));
+        let (mut name, mut size) = (row.info.filename.clone().unwrap_or_default(), None);
+        if !is_page && !zdm_core::ftp::is_ftp_url(&row.info.url) {
+            let mut opts = Options {
+                auth: auth.clone(),
+                creds: Arc::new(auth.as_ref().map_or_else(zdm_core::Credentials::default, |(u, p)| zdm_core::Credentials::new(u, p))),
+                proxy: set.proxy.clone(),
+                referer: row.referer.clone(),
+                headers,
+                ..Options::default()
+            };
+            if let Some(ua) = &row.user_agent {
+                opts.user_agent = ua.clone();
+            }
+            let client = build_client(&opts)?;
+            let p = tokio::time::timeout(Duration::from_secs(20), zdm_core::probe_with(&client, &row.info.url, &opts.creds)).await.map_err(|_| anyhow!("the server took too long to answer"))??;
+            if name.is_empty() {
+                name = p.filename.clone();
+            }
+            size = p.size;
+        }
+        if name.is_empty() {
+            name = zdm_core::ftp::file_name(&row.info.url);
+        }
+        let category = categorize_with(&name, &set.category_exts);
+        let dir = row.dest_dir.clone().unwrap_or_else(|| set.category_dirs.get(&category).cloned().unwrap_or_else(|| PathBuf::from(&set.download_root).join(&category).to_string_lossy().into_owned()));
+        Ok(PreviewInfo { filename: name, size, category, dir })
+    }
+
+    pub fn set_target(&self, id: i64, filename: Option<&str>, dest_dir: Option<&str>) -> Result<()> {
+        let st = self.get(id)?.state;
+        if matches!(st, State::Running | State::Completed) {
+            bail!("pause task {id} before changing where it is saved");
+        }
+        if let Some(f) = filename {
+            if f.is_empty() || f.contains(['/', '\\']) || f == "." || f == ".." {
+                bail!("filename must be a plain file name");
+            }
+        }
+        if let Some(d) = dest_dir {
+            if !Path::new(d).is_absolute() {
+                bail!("the folder must be an absolute path");
+            }
+        }
+        self.store().set_target(id, filename, dest_dir)
     }
 
     pub fn get(&self, id: i64) -> Result<TaskInfo> {
@@ -414,7 +472,13 @@ impl Manager {
         let st = self.get(id)?.state;
         match st {
             State::Completed => bail!("task {id} is already completed"),
-            State::Paused => return Ok(()),
+            State::Paused => {
+                // "Download later" on a task that was waiting for the user's choice: keep it, drop the question
+                if self.get(id)?.error.as_deref() == Some(ASK_MARKER) {
+                    self.store().set_state(id, State::Paused, None)?;
+                }
+                return Ok(());
+            }
             _ => {}
         }
         self.store().set_state(id, State::Paused, None)?;

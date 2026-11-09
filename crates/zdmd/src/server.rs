@@ -44,6 +44,11 @@ pub async fn dispatch(m: &Arc<Manager>, req: Request) -> Response {
                 m.move_to_top(id)?;
                 Response::Ok
             }
+            Request::Preview { id } => Response::Preview(m.preview(id).await?),
+            Request::SetTarget { id, filename, dest_dir } => {
+                m.set_target(id, filename.as_deref(), dest_dir.as_deref())?;
+                Response::Ok
+            }
             Request::SetUrl { id, url } => {
                 m.set_url(id, &url)?;
                 Response::Ok

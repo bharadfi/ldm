@@ -16,6 +16,7 @@ mod menus;
 mod options;
 mod prefs;
 mod progress;
+mod ask;
 mod complete;
 mod segments;
 mod sound;
@@ -66,6 +67,7 @@ enum Event {
     Links(Vec<GrabLink>),
     Formats(zdm_proto::FormatList),
     FormatsFailed(String),
+    Preview(i64, Result<zdm_proto::PreviewInfo, String>),
     AfterAll(AfterAll),
     GrabFailed(String),
     Offline(String),
@@ -117,7 +119,18 @@ fn worker(events: async_channel::Sender<Event>, mut cmds: tokio::sync::mpsc::Unb
                 _ = tick.tick() => None,
                 c = cmds.recv() => match c { Some(c) => Some(c), None => return },
             };
-            if let Some(req @ (Request::Grab(_) | Request::Formats { .. })) = req {
+            if let Some(Request::Preview { id }) = req {
+                let events = events.clone();
+                tokio::spawn(async move {
+                    let r = match zdm_proto::call(&Request::Preview { id }).await {
+                        Ok(Response::Preview(p)) => Ok(p),
+                        Ok(Response::Error { message }) => Err(message),
+                        Ok(_) => Err("unexpected answer from the daemon".into()),
+                        Err(e) => Err(e.to_string()),
+                    };
+                    let _ = events.send(Event::Preview(id, r)).await;
+                });
+            } else if let Some(req @ (Request::Grab(_) | Request::Formats { .. })) = req {
                 // a crawl or a video lookup can take a while: run it beside the polling instead of in front of it
                 let events = events.clone();
                 tokio::spawn(async move {
@@ -211,6 +224,15 @@ pub struct Ui {
     pub sidebar_scroll: gtk::ScrolledWindow,
     pub latest: RefCell<Vec<TaskInfo>>,
     pub progress: Rc<RefCell<HashMap<i64, Rc<ProgressWin>>>>,
+    pub asks: RefCell<HashMap<i64, Rc<ask::AskWin>>>,
+    pub asked: RefCell<HashSet<i64>>,
+}
+
+impl Ui {
+    /// Address of a task as last listed (to see whether the confirmation window changed it).
+    pub fn asks_url(&self, id: i64) -> String {
+        self.latest.borrow().iter().find(|t| t.id == id).map(|t| t.url.clone()).unwrap_or_default()
+    }
 }
 
 #[derive(Clone)]
@@ -448,6 +470,8 @@ fn build_ui(app: &adw::Application) -> Rc<Ui> {
         sidebar_scroll: sidebar_scroll.clone(),
         latest: RefCell::default(),
         progress: Rc::default(),
+        asks: RefCell::default(),
+        asked: RefCell::default(),
     });
     install_menu(&ui);
     install_inputs(&ui);
@@ -560,6 +584,12 @@ fn build_ui(app: &adw::Application) -> Rc<Ui> {
                         let fresh = apply_tasks(&ui, &tasks);
                         menus::refresh_actions(&ui);
                         notify_and_tray(&ui, &tasks);
+                        // downloads the browser handed over wait here until the user chooses what to do
+                        for t in tasks.iter().filter(|t| t.state == State::Paused && t.error.as_deref() == Some(zdm_proto::ASK_MARKER)) {
+                            if ui.asked.borrow_mut().insert(t.id) {
+                                ask::open(&ui, t);
+                            }
+                        }
                         let first = !ui.seen_first.replace(true);
                         if !first && ui.prefs.borrow().auto_progress {
                             let now = glib::real_time() / 1_000_000;
@@ -585,6 +615,15 @@ fn build_ui(app: &adw::Application) -> Rc<Ui> {
                         }
                     }
                     Event::Links(l) => grabber::show_results(&ui, l),
+                    Event::Preview(id, r) => {
+                        let win = ui.asks.borrow().get(&id).cloned();
+                        if let Some(w) = win {
+                            match r {
+                                Ok(p) => w.fill(&p),
+                                Err(e) => w.failed(&e),
+                            }
+                        }
+                    }
                     Event::Formats(l) => video::show_results(&ui, l),
                     Event::FormatsFailed(m) => video::show_error(&ui, &m),
                     Event::GrabFailed(m) => grabber::show_error(&ui, &m),
@@ -608,7 +647,7 @@ fn banner_hide(ui: &Ui) {
     ui.banner.set_revealed(false);
 }
 
-fn send(ui: &Ui, r: Request) {
+pub fn send(ui: &Ui, r: Request) {
     let _ = ui.cmd_tx.send(r);
 }
 
@@ -856,7 +895,7 @@ fn task_by_id(ui: &Ui, id: i64) -> Option<TaskInfo> {
     ui.latest.borrow().iter().find(|t| t.id == id).cloned()
 }
 
-fn show_progress(ui: &Rc<Ui>, id: i64) {
+pub fn show_progress(ui: &Rc<Ui>, id: i64) {
     if let Some(pw) = ui.progress.borrow().get(&id) {
         pw.win.present();
         return;

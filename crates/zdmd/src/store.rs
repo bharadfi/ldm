@@ -169,6 +169,16 @@ impl Store {
         Ok(())
     }
 
+    pub fn set_target(&self, id: i64, filename: Option<&str>, dest_dir: Option<&str>) -> Result<()> {
+        if let Some(f) = filename {
+            self.db.execute("UPDATE tasks SET filename=? WHERE id=?", params![f, id])?;
+        }
+        if let Some(d) = dest_dir {
+            self.db.execute("UPDATE tasks SET dest_dir=? WHERE id=?", params![d, id])?;
+        }
+        Ok(())
+    }
+
     pub fn set_task_queue(&self, id: i64, queue: &str) -> Result<()> {
         self.db.execute("UPDATE tasks SET queue=? WHERE id=?", params![queue, id])?;
         Ok(())

@@ -114,6 +114,7 @@ pub fn parse_message(v: &Value) -> Result<Msg, String> {
                 user_agent: opt_str(v, "user_agent", 1024)?.filter(|u| !u.contains(['\r', '\n'])),
                 headers,
                 start: true,
+                ask: true,
                 ..Default::default()
             }))
         }

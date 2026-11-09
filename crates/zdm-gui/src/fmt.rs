@@ -47,6 +47,7 @@ pub fn status_label(t: &TaskInfo) -> String {
             e => format!("Error: {}", e.unwrap_or("unknown")),
         },
         State::Queued => "Queued".into(),
+        State::Paused if t.error.as_deref() == Some(zdm_proto::ASK_MARKER) => "Waiting for you".into(),
         State::Paused => match t.size {
             Some(s) if s > 0 => format!("Paused {:.1}%", t.downloaded as f64 * 100.0 / s as f64),
             _ => "Paused".into(),

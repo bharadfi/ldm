@@ -75,6 +75,22 @@ pub struct AddRequest {
     /// Kept in the daemon's private database, never shown in the task list.
     #[serde(default)]
     pub auth: Option<(String, String)>,
+    /// Add it paused and marked [`ASK_MARKER`]: the window asks the user where to save it and whether to start.
+    #[serde(default)]
+    pub ask: bool,
+}
+
+/// `TaskInfo::error` of a task that waits for the user to confirm it (state `Paused`).
+pub const ASK_MARKER: &str = "Waiting for your choice";
+
+/// What the daemon learned about a download before it starts (for the confirmation window).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct PreviewInfo {
+    pub filename: String,
+    pub size: Option<u64>,
+    pub category: String,
+    /// Folder the file would go to.
+    pub dir: String,
 }
 
 fn yes() -> bool {
@@ -372,6 +388,10 @@ pub enum Request {
         #[serde(default)]
         cookie: Option<String>,
     },
+    /// Ask the server about a task that has not started (name, size) and where it would be saved.
+    Preview { id: i64 },
+    /// Choose the file name and/or folder of a task that is not running.
+    SetTarget { id: i64, filename: Option<String>, dest_dir: Option<String> },
     Ping,
 }
 
@@ -387,6 +407,7 @@ pub enum Response {
     AfterAll(AfterAll),
     Links { links: Vec<GrabLink> },
     Formats(FormatList),
+    Preview(PreviewInfo),
     Error { message: String },
 }
 

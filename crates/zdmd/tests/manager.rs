@@ -744,3 +744,27 @@ async fn saved_site_logins_are_used_without_typing_them_again() {
     assert_eq!(all.iter().find(|x| x.id == d.id).unwrap().state, State::Completed);
     env.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ask_first_download_waits_for_the_user_then_goes_where_told() {
+    let srv = testserver::start(server_cfg(MIB, "movie.mkv")).await;
+    let env = Env::new(None);
+    let t = env.m.add(AddRequest { url: srv.url("/p"), start: true, ask: true, ..Default::default() }).unwrap();
+    assert_eq!((t.state, t.error.as_deref()), (State::Paused, Some(zdm_proto::ASK_MARKER)));
+    // the confirmation window can see name, size and category before anything is fetched
+    let p = env.m.preview(t.id).await.unwrap();
+    assert_eq!((p.filename.as_str(), p.size, p.category.as_str()), ("movie.mkv", Some(MIB), "Video"));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(env.m.get(t.id).unwrap().state, State::Paused, "must not start by itself");
+    // "download later" keeps it, without the question
+    env.m.pause(t.id).unwrap();
+    assert_eq!(env.m.get(t.id).unwrap().error, None);
+    // chosen place and name, then start
+    let dir = env.root.path().join("chosen");
+    env.m.set_target(t.id, Some("mine.mkv"), Some(dir.to_str().unwrap())).unwrap();
+    assert!(env.m.set_target(t.id, Some("../x"), None).is_err());
+    env.m.resume(t.id).unwrap();
+    env.until("done", |ts| ts[0].state == State::Completed).await;
+    assert!(dir.join("mine.mkv").exists());
+    env.stop().await;
+}
