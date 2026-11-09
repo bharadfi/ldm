@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parent
 SRC = ROOT / "src"
 DIST = ROOT / "dist"
 
-VERSION = "0.1.15"
+VERSION = "0.1.16"
 # Public half of the extension signing key (the private half stays on the maintainer's computer): pins the Chromium extension ID so the native-messaging manifest can
 # allow exactly this extension. Must match CHROME_EXTENSION_ID in crates/zdm-nmhost/src/lib.rs.
 CHROME_KEY = (

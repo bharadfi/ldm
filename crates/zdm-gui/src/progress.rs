@@ -218,7 +218,7 @@ impl ProgressWin {
         let tv = adw::ToolbarView::new();
         tv.add_top_bar(&header);
         tv.set_content(Some(&content));
-        let win = adw::Window::builder().transient_for(parent).destroy_with_parent(true).title("Download progress").default_width(620).content(&tv).build();
+        let win = adw::Window::builder().application(&parent.application().expect("application")).title("Download progress").default_width(620).content(&tv).build();
         win.add_css_class("ldm-window");
 
         let pw = Rc::new(ProgressWin { win, url, status, values, bar, area, layout, full, rows, toggle, show_done, state: Cell::new(State::Completed) });

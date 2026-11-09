@@ -88,11 +88,8 @@ pub fn open(ui: &Rc<Ui>, t: &TaskInfo) {
     let tv = adw::ToolbarView::new();
     tv.add_top_bar(&header);
     tv.set_content(Some(&content));
-    let win = adw::Window::builder().title("Download file info").default_width(700).content(&tv).build();
+    let win = adw::Window::builder().application(&ui.window.application().expect("application")).title("Download file info").default_width(700).content(&tv).build();
     win.add_css_class("ldm-window");
-    if ui.window.is_visible() {
-        win.set_transient_for(Some(&ui.window));
-    }
 
     let name0 = t.filename.clone().unwrap_or_default();
     let aw = Rc::new(AskWin { win, id: t.id, category, save_as, size, icon, remember, remember_dir, names, root, settings_dirs: dirs, acted: Cell::new(false), filename: RefCell::new(name0) });

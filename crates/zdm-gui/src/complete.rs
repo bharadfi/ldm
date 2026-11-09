@@ -56,11 +56,8 @@ pub fn show(ui: &Rc<Ui>, t: &TaskInfo) {
     let tv = adw::ToolbarView::new();
     tv.add_top_bar(&header);
     tv.set_content(Some(&content));
-    let win = adw::Window::builder().transient_for(&ui.window).title("Download complete").default_width(620).content(&tv).build();
+    let win = adw::Window::builder().application(&ui.window.application().expect("application")).title("Download complete").default_width(620).content(&tv).build();
     win.add_css_class("ldm-window");
-    if !ui.window.is_visible() {
-        win.set_transient_for(None::<&gtk::Window>);
-    }
 
     let file = gio::File::for_path(&dest);
     {
