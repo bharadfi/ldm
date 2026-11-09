@@ -42,6 +42,9 @@ pub struct GuiPrefs {
     pub sound_failed: String,
     #[serde(default)]
     pub sound_all_done: String,
+    /// Show the "download complete" window when a download started from a progress window finishes.
+    #[serde(default = "yes")]
+    pub show_complete: bool,
     /// Titles of the table columns the user switched off.
     #[serde(default)]
     pub hidden_columns: Vec<String>,
@@ -53,7 +56,7 @@ fn nine() -> u32 {
 
 impl Default for GuiPrefs {
     fn default() -> Self {
-        GuiPrefs { auto_progress: true, close_to_tray: true, notifications: true, monitor_clipboard: false, dark_mode: false, font_pt: 9, toolbar_labels: true, toolbar_small: false, sound_complete: String::new(), sound_failed: String::new(), sound_all_done: String::new(), hidden_columns: vec![] }
+        GuiPrefs { auto_progress: true, close_to_tray: true, notifications: true, monitor_clipboard: false, dark_mode: false, font_pt: 9, toolbar_labels: true, toolbar_small: false, sound_complete: String::new(), sound_failed: String::new(), sound_all_done: String::new(), show_complete: true, hidden_columns: vec![] }
     }
 }
 

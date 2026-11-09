@@ -16,6 +16,7 @@ mod menus;
 mod options;
 mod prefs;
 mod progress;
+mod complete;
 mod segments;
 mod sound;
 mod tray;
@@ -752,7 +753,7 @@ fn row_index(store: &gtk::ListStore) -> HashMap<i64, i32> {
     index
 }
 
-fn apply_tasks(ui: &Ui, tasks: &[TaskInfo]) -> Vec<i64> {
+fn apply_tasks(ui: &Rc<Ui>, tasks: &[TaskInfo]) -> Vec<i64> {
     let mut fresh: Vec<i64> = vec![];
     let store = &ui.store;
     let present: HashSet<i64> = tasks.iter().map(|t| t.id).collect();
@@ -821,8 +822,12 @@ fn apply_tasks(ui: &Ui, tasks: &[TaskInfo]) -> Vec<i64> {
         match tasks.iter().find(|t| t.id == id) {
             Some(t) => {
                 let speed = ui.speeds.borrow().get(&id).map_or(0.0, |e| e.2);
-                if pw.update(t, speed) {
+                let up = pw.update(t, speed);
+                if up.just_completed {
                     pw.win.close();
+                    if up.show_complete && ui.prefs.borrow().show_complete {
+                        complete::show(ui, t);
+                    }
                 }
             }
             None => pw.win.close(),
@@ -857,7 +862,28 @@ fn show_progress(ui: &Rc<Ui>, id: i64) {
         return;
     }
     let map = ui.progress.clone();
-    let pw = ProgressWin::new(&ui.window, id, ui.cmd_tx.clone(), move || {
+    let hooks = {
+        let (tx1, tx2) = (ui.cmd_tx.clone(), ui.cmd_tx.clone());
+        let settings = ui.settings.borrow().clone();
+        progress::Hooks {
+            global_limit_kib: settings.as_ref().map_or(0, |s| s.global_limit_kib),
+            set_limit: {
+                let ui_settings = settings.clone();
+                Rc::new(move |kib| {
+                    if let Some(mut s) = ui_settings.clone() {
+                        s.global_limit_kib = kib;
+                        let _ = tx1.send(Request::SetSettings(s));
+                    }
+                })
+            },
+            after_all: ui.after_all.borrow().clone(),
+            set_after_all: Rc::new(move |a| {
+                let _ = tx2.send(Request::SetAfterAll(a));
+            }),
+        }
+    };
+    let show_complete = ui.prefs.borrow().show_complete;
+    let pw = ProgressWin::new(&ui.window, id, ui.cmd_tx.clone(), hooks, show_complete, move || {
         // Deferred: the map is borrowed while a window closes itself from `apply_tasks`.
         let map = map.clone();
         glib::idle_add_local_once(move || {

@@ -27,6 +27,7 @@ impl Layout {
     }
 
     /// Segments that still have bytes to fetch (roughly the number of open connections).
+    #[allow(dead_code)]
     pub fn active(&self) -> usize {
         self.segs.iter().filter(|s| s.pos < s.end).count()
     }
