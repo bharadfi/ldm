@@ -129,7 +129,7 @@ fn allow_unsigned_addons(program: &str) -> bool {
     };
     let Some(root) = std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".mozilla/firefox")) else { return false };
     let Ok(dirs) = std::fs::read_dir(root) else { return false };
-    for d in dirs.flatten().filter(|d| d.path().is_dir() && d.file_name().to_string_lossy().ends_with(suffix)) {
+    if let Some(d) = dirs.flatten().find(|d| d.path().is_dir() && d.file_name().to_string_lossy().ends_with(suffix)) {
         let f = d.path().join("user.js");
         const LINE: &str = "user_pref(\"xpinstall.signatures.required\", false);";
         let text = std::fs::read_to_string(&f).unwrap_or_default();
