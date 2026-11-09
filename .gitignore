@@ -2,3 +2,9 @@ target/
 *.jsonl
 dl/
 extension/dist/
+
+# local development notes (kept on the maintainer's computer only)
+/HANDOFF.md
+/CLAUDE.md
+/docs/idm-*.md
+/docs/feature-checklist.md
