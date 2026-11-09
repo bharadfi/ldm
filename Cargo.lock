@@ -2792,7 +2792,7 @@ dependencies = [
 
 [[package]]
 name = "zdm-cli"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "clap",
@@ -2804,7 +2804,7 @@ dependencies = [
 
 [[package]]
 name = "zdm-core"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "aes",
  "anyhow",
@@ -2826,7 +2826,7 @@ dependencies = [
 
 [[package]]
 name = "zdm-gui"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -2843,7 +2843,7 @@ dependencies = [
 
 [[package]]
 name = "zdm-nmhost"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "dirs",
@@ -2856,7 +2856,7 @@ dependencies = [
 
 [[package]]
 name = "zdm-proto"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "dirs",
@@ -2867,7 +2867,7 @@ dependencies = [
 
 [[package]]
 name = "zdmd"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

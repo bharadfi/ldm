@@ -39,4 +39,14 @@ Description: Linux Download Manager
  Segmented, resumable downloads with browser integration, queues,
  scheduler, site grabber and video downloads.
 C
+cat > "$P/DEBIAN/postinst" <<'S'
+#!/bin/sh
+# An upgrade must not leave the old window or background service running next to the new files: they would
+# speak different versions. Stop them; the window and service start again the next time LDM is opened.
+set -e
+pkill -x zdm-gui 2>/dev/null || true
+pkill -x zdmd 2>/dev/null || true
+exit 0
+S
+chmod 755 "$P/DEBIAN/postinst"
 dpkg-deb --build --root-owner-group "$P" "$OUT/linux-download-manager_${VER}_amd64.deb"
